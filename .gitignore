@@ -1,0 +1,18 @@
+# Build artifacts. Anchor the binary name so it cannot match cmd/faulttest/.
+/bin/
+/dist/
+/faulttest
+*.test
+*.out
+
+# Test and benchmark output
+/results/
+/docs/benchmarks/*.raw.json
+*.prof
+*.log
+
+# Local tooling / editor state
+.DS_Store
+.idea/
+.vscode/
+/.claude/settings.local.json
