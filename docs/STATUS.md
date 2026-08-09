@@ -1,25 +1,30 @@
 # Current state
 
-Milestone: M1 | Active task: GO-00 (from [`PRD.md`](PRD.md))
-Branch: main
-Last known good commit: NONE
+Milestone: M1 | Active task: GO-01 (from [`PRD.md`](PRD.md))
+Branch: feat/GO-01-lost-response-core
+Last known good commit: 1caea2c
 Status: in progress
 
-Done: repository scaffold — Go module pinned to 1.27.4, `.gitignore`,
-`CLAUDE.md`, README stub, PRD and shared workflow under `docs/`,
-`scripts/verify.sh` and `scripts/verify-full.sh`, GitHub Actions running both,
-and a `faulttest` CLI skeleton that serves `version` and `help` with the exit
-codes the PRD specifies.
+Done: the application under test. A loopback HTTP/1.1 fixture with two modes —
+`unsafe-counter` applies every successful operation, `safe-counter` applies at
+most one per idempotency key — plus `POST /__test/reset` and
+`GET /__test/state` so an oracle can observe what was actually applied. State
+is isolated per case ID. The state projection lists the key of every applied
+operation, so a duplicate is visible as a repeated entry and not only as a
+counter value. A goroutine-leak check is asserted by every server test.
 
-Evidence: `./scripts/verify-full.sh` PASS on 2026-11-10 (gofmt clean, `go vet`
-clean, `go build`, `go test`, `go test -race`).
+Evidence: `./scripts/verify-full.sh` PASS on 2026-11-10. `go test -race` clean,
+including a 32-case concurrent isolation test.
 
-Not done: everything in the product. No fixture, no proxy, no fault injection,
-no scenario parsing, no oracle.
+Not done: the proxy, fault injection, scenario parsing, the oracle's verdict
+logic, and the CLI's `run` subcommand.
 
-Known issues / failed approaches: none yet.
+Known issues / failed approaches: the first leak-check helper used
+`defer leaktest.Check(t)()`, which runs before `t.Cleanup` shuts servers down
+and therefore reported every test as leaking. It now registers its own cleanup
+so ordering cannot be got wrong at the call site.
 
-Next action: implement GO-01, the stateful fixture and its state oracle, as the
-first piece of the lost-response path.
+Next action: implement GO-02 and GO-03 — the forwarding proxy and its fault
+stages — against this fixture.
 
 Human decision needed: none.
