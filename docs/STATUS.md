@@ -1,30 +1,35 @@
 # Current state
 
-Milestone: M1 | Active task: GO-01 (from [`PRD.md`](PRD.md))
+Milestone: M1 | Active task: GO-02, GO-03 (from [`PRD.md`](PRD.md))
 Branch: feat/GO-01-lost-response-core
-Last known good commit: 1caea2c
+Last known good commit: f851189
 Status: in progress
 
-Done: the application under test. A loopback HTTP/1.1 fixture with two modes —
-`unsafe-counter` applies every successful operation, `safe-counter` applies at
-most one per idempotency key — plus `POST /__test/reset` and
-`GET /__test/state` so an oracle can observe what was actually applied. State
-is isolated per case ID. The state projection lists the key of every applied
-operation, so a duplicate is visible as a repeated entry and not only as a
-counter value. A goroutine-leak check is asserted by every server test.
+Done: the fault proxy. A loopback-only HTTP/1.1 forwarding proxy with all four
+fault actions the PRD specifies — `reject_connection` and `delay_ms` at
+`before_forward`, `close_client_connection` and `delay_ms` at
+`after_upstream_response`. The lost-response mechanism works: the proxy reads a
+complete upstream response, then hijacks the client connection and closes it
+with `SetLinger(0)` so the client sees a reset rather than an ambiguous EOF.
 
-Evidence: `./scripts/verify-full.sh` PASS on 2026-11-10. `go test -race` clean,
-including a 32-case concurrent isolation test.
+Fault selection is keyed by (case ID, attempt, stage) and never by timing. The
+proxy also tracks in-flight upstream calls per case and exposes
+`WaitForQuiescence`, which is the settlement boundary an oracle needs: once a
+complete upstream response has been read, the backend has committed or refused.
 
-Not done: the proxy, fault injection, scenario parsing, the oracle's verdict
-logic, and the CLI's `run` subcommand.
+Loopback is enforced twice — when parsing the upstream URL (no DNS lookup, so
+validation cannot touch a network) and again in the dialer's `Control` hook.
 
-Known issues / failed approaches: the first leak-check helper used
-`defer leaktest.Check(t)()`, which runs before `t.Cleanup` shuts servers down
-and therefore reported every test as leaking. It now registers its own cleanup
-so ordering cannot be got wrong at the call site.
+Evidence: `./scripts/verify-full.sh` PASS on 2026-11-10. Tests assert that a
+`before_forward` rejection never reaches the upstream and that a
+`close_client_connection` fault reaches it exactly once.
 
-Next action: implement GO-02 and GO-03 — the forwarding proxy and its fault
-stages — against this fixture.
+Not done: scenario parsing, the retry client, the oracle's verdict logic, and
+the CLI's `run` subcommand. Nothing yet ties a fault to an observed duplicate.
+
+Known issues / failed approaches: none outstanding.
+
+Next action: implement the retry client, the state oracle, and strict scenario
+validation, so a scenario file can describe the whole interaction.
 
 Human decision needed: none.
