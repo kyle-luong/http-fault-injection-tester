@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "name": "reject-before-forward",
+  "fixture": "unsafe-counter",
+  "client": {
+    "method": "POST",
+    "path": "/operation",
+    "max_attempts": 2,
+    "retry_on_transport_error": true,
+    "reuse_idempotency_key": true
+  },
+  "faults": [
+    {
+      "attempt": 1,
+      "stage": "before_forward",
+      "action": "reject_connection"
+    }
+  ],
+  "invariant": {
+    "type": "counter_equals",
+    "expected": 1
+  }
+}

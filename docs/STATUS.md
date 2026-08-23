@@ -1,35 +1,37 @@
 # Current state
 
-Milestone: M1 | Active task: GO-02, GO-03 (from [`PRD.md`](PRD.md))
+Milestone: M1 | Active task: GO-03, GO-04 schema (from [`PRD.md`](PRD.md))
 Branch: feat/GO-01-lost-response-core
-Last known good commit: f851189
+Last known good commit: 5526279
 Status: in progress
 
-Done: the fault proxy. A loopback-only HTTP/1.1 forwarding proxy with all four
-fault actions the PRD specifies — `reject_connection` and `delay_ms` at
-`before_forward`, `close_client_connection` and `delay_ms` at
-`after_upstream_response`. The lost-response mechanism works: the proxy reads a
-complete upstream response, then hijacks the client connection and closes it
-with `SetLinger(0)` so the client sees a reset rather than an ambiguous EOF.
+Done: the three pieces that sit either side of the proxy.
 
-Fault selection is keyed by (case ID, attempt, stage) and never by timing. The
-proxy also tracks in-flight upstream calls per case and exposes
-`WaitForQuiescence`, which is the settlement boundary an oracle needs: once a
-complete upstream response has been read, the backend has committed or refused.
+- `internal/client`: the retry policy. Each attempt sends a byte-identical body
+  and, when the policy reuses the key, the same idempotency key — the condition
+  under which a correct server may deduplicate and an incorrect one duplicates.
+  A transport error is recorded as data, not returned as a harness failure,
+  because ambiguity is the behaviour under test.
+- `internal/verify`: the state oracle and the verdict vocabulary. `fail` is
+  reserved for the application under test; `inconclusive` and `harness_error`
+  exist so the tool never reports a bug it did not establish.
+- `internal/scenario`: strict v1 parsing. Unknown keys, unknown enum values,
+  impossible rules and ambiguous schedules are all refused before anything
+  starts, because a scenario that silently does nothing is worse than one that
+  refuses to run.
 
-Loopback is enforced twice — when parsing the upstream URL (no DNS lookup, so
-validation cannot touch a network) and again in the dialer's `Control` hook.
+Five example scenarios are checked in under `scenarios/` and a test parses
+every one of them, so the shipped examples cannot rot.
 
-Evidence: `./scripts/verify-full.sh` PASS on 2026-11-10. Tests assert that a
-`before_forward` rejection never reaches the upstream and that a
-`close_client_connection` fault reaches it exactly once.
+Evidence: `./scripts/verify-full.sh` PASS on 2026-11-10, including 27 scenario
+rejection cases.
 
-Not done: scenario parsing, the retry client, the oracle's verdict logic, and
-the CLI's `run` subcommand. Nothing yet ties a fault to an observed duplicate.
+Not done: nothing wires these together yet. The CLI still only serves `version`
+and `help`, and no test has yet observed a duplicate caused by a lost response.
 
 Known issues / failed approaches: none outstanding.
 
-Next action: implement the retry client, the state oracle, and strict scenario
-validation, so a scenario file can describe the whole interaction.
+Next action: add the single-case runner and the CLI `run` subcommand, then prove
+end to end that the unsafe fixture duplicates and the safe one does not.
 
 Human decision needed: none.

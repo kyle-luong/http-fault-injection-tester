@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "name": "delayed-response",
+  "fixture": "safe-counter",
+  "client": {
+    "method": "POST",
+    "path": "/operation",
+    "max_attempts": 2,
+    "retry_on_transport_error": true,
+    "reuse_idempotency_key": true,
+    "timeout_ms": 200
+  },
+  "faults": [
+    {
+      "attempt": 1,
+      "stage": "after_upstream_response",
+      "action": "delay_ms",
+      "delay_ms": 600
+    }
+  ],
+  "invariant": {
+    "type": "counter_equals",
+    "expected": 1
+  }
+}

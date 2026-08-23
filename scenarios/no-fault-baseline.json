@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "no-fault-baseline",
+  "fixture": "unsafe-counter",
+  "client": {
+    "method": "POST",
+    "path": "/operation",
+    "max_attempts": 1,
+    "retry_on_transport_error": false,
+    "reuse_idempotency_key": true
+  },
+  "faults": [],
+  "invariant": {
+    "type": "counter_equals",
+    "expected": 1
+  }
+}
