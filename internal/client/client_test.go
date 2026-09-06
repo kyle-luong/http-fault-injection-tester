@@ -1,10 +1,15 @@
 package client
 
 import (
+	"bufio"
 	"context"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -287,5 +292,138 @@ func TestNewHTTPClientRefusesRedirects(t *testing.T) {
 	}
 	if err := hc.CheckRedirect(nil, nil); err == nil {
 		t.Error("CheckRedirect allowed a redirect")
+	}
+}
+
+// resettingServer is a hand-rolled HTTP/1.1 server that answers the first
+// request on a connection normally and then, for the next request on that same
+// connection, reads the request in full and resets the connection instead of
+// responding.
+//
+// That models the situation this harness creates on purpose: the operation has
+// been applied and only the response is lost. It is also exactly the situation
+// in which http.Transport replays a request it believes to be idempotent, so a
+// stub server is used rather than httptest, which cannot destroy a connection.
+type resettingServer struct {
+	baseURL  string
+	requests atomic.Int64
+}
+
+func startResettingServer(t *testing.T) *resettingServer {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &resettingServer{baseURL: "http://" + ln.Addr().String()}
+
+	var (
+		mu    sync.Mutex
+		conns []net.Conn
+		wg    sync.WaitGroup
+	)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, conn)
+			mu.Unlock()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				srv.serve(conn)
+			}()
+		}
+	}()
+
+	// Waiting on the WaitGroup here proves no goroutine outlives the test.
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+		mu.Unlock()
+		wg.Wait()
+	})
+	return srv
+}
+
+func (s *resettingServer) serve(conn net.Conn) {
+	defer func() { _ = conn.Close() }()
+	reader := bufio.NewReader(conn)
+	for n := 1; ; n++ {
+		req, err := http.ReadRequest(reader)
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, req.Body)
+		s.requests.Add(1)
+
+		if n > 1 {
+			// The request has been read in full, so a real server would have
+			// applied it by now. Reset so the response never arrives.
+			if tcp, ok := conn.(*net.TCPConn); ok {
+				_ = tcp.SetLinger(0)
+			}
+			return
+		}
+
+		body := `{"case_id":"case-0001","operation_id":"case-0001-key","counter":1,"deduplicated":false}`
+		_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "+
+			strconv.Itoa(len(body))+"\r\n\r\n"+body)
+	}
+}
+
+// TestExecuteSendsOneWireRequestPerAttempt pins one logical attempt to exactly
+// one request on the wire.
+//
+// http.Transport silently replays a request on a reused connection when it
+// considers it idempotent, and it treats any request carrying an
+// Idempotency-Key as such. This harness always sends that header, so without
+// the guard in sendOnce the stdlib would re-send an attempt whose response was
+// destroyed on purpose: the side effect would be applied twice, one attempt
+// number would cover several requests, and the attempt could even be recorded
+// as a success.
+func TestExecuteSendsOneWireRequestPerAttempt(t *testing.T) {
+	srv := startResettingServer(t)
+	hc := NewHTTPClient()
+	t.Cleanup(func() { CloseIdleConnections(hc) })
+
+	// Warm a pooled connection so the attempt below runs on a reused one,
+	// which is the only case in which the transport would replay.
+	warm, err := hc.Post(srv.baseURL+"/operation", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("warmup request: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, warm.Body)
+	_ = warm.Body.Close()
+
+	before := srv.requests.Load()
+
+	result, err := Execute(context.Background(), hc, srv.baseURL, "case-0001", basePolicy())
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if got := srv.requests.Load() - before; got != 1 {
+		t.Errorf("server saw %d request(s) for one attempt, want 1: the transport replayed a "+
+			"request whose side effect had already been applied", got)
+	}
+	if len(result.Attempts) != 1 {
+		t.Fatalf("recorded %d attempts, want 1", len(result.Attempts))
+	}
+	if result.Attempts[0].TransportError == "" {
+		t.Errorf("attempt recorded status %d and no transport error: a destroyed response was "+
+			"reported as a result", result.Attempts[0].StatusCode)
+	}
+	if result.Succeeded() {
+		t.Error("Execute reported success for an attempt whose response never arrived")
 	}
 }

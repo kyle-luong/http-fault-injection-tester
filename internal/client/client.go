@@ -208,6 +208,22 @@ func (p Policy) sendOnce(
 	req.Header.Set(proxy.HeaderAttempt, strconv.Itoa(attempt.Number))
 	req.ContentLength = int64(len(body))
 
+	// Exactly one wire request per logical attempt.
+	//
+	// http.Transport silently replays a request when a *reused* connection
+	// fails, and Request.isReplayable treats any request carrying an
+	// Idempotency-Key header as safe to replay. This harness always sends that
+	// header, so the stdlib would re-send an attempt whose response the proxy
+	// destroyed on purpose: the side effect would be applied twice, several
+	// wire requests would share one attempt number (breaking deterministic
+	// fault selection), and a lost response could even be reported here as a
+	// success. Clearing GetBody makes the request non-replayable, so the retry
+	// decision belongs to this package alone.
+	//
+	// A transport-level retry where nothing was written is unaffected and
+	// remains safe, because such a request never reached the server.
+	req.GetBody = nil
+
 	resp, err := hc.Do(req)
 	if err != nil {
 		return 0, nil, err

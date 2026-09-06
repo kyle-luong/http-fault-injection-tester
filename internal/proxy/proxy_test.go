@@ -1,13 +1,16 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -566,5 +569,149 @@ func TestReadBoundedRejectsOversizedInput(t *testing.T) {
 	}
 	if data, err := readBounded(nil, 5); err != nil || data != nil {
 		t.Errorf("readBounded(nil) = (%v, %v), want (nil, nil)", data, err)
+	}
+}
+
+// resettingUpstream answers the first request on a connection normally and
+// then, for the next request on that same connection, reads the request in full
+// and resets instead of responding. httptest cannot do this: destroying a
+// connection requires owning it.
+type resettingUpstream struct {
+	baseURL  string
+	requests atomic.Int64
+}
+
+func startResettingUpstream(t *testing.T) *resettingUpstream {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	up := &resettingUpstream{baseURL: "http://" + ln.Addr().String()}
+
+	var (
+		mu    sync.Mutex
+		conns []net.Conn
+		wg    sync.WaitGroup
+	)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, conn)
+			mu.Unlock()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				up.serve(conn)
+			}()
+		}
+	}()
+
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+		mu.Unlock()
+		wg.Wait()
+	})
+	return up
+}
+
+func (u *resettingUpstream) serve(conn net.Conn) {
+	defer func() { _ = conn.Close() }()
+	reader := bufio.NewReader(conn)
+	for n := 1; ; n++ {
+		req, err := http.ReadRequest(reader)
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, req.Body)
+		u.requests.Add(1)
+
+		if n > 1 {
+			if tcp, ok := conn.(*net.TCPConn); ok {
+				_ = tcp.SetLinger(0)
+			}
+			return
+		}
+
+		body := `{"ok":true}`
+		_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "+
+			strconv.Itoa(len(body))+"\r\n\r\n"+body)
+	}
+}
+
+// sendWithIdempotencyKey mirrors what internal/client puts on the wire: the
+// control headers plus an Idempotency-Key. The header name matters, because
+// http.Transport hardcodes it as a signal that a request may be replayed.
+func sendWithIdempotencyKey(t *testing.T, hc *http.Client, baseURL, caseID string, attempt int) (*http.Response, error) {
+	t.Helper()
+	body := `{"case_id":"` + caseID + `","delta":1}`
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/operation", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", caseID+"-key")
+	req.Header.Set(HeaderCaseID, caseID)
+	req.Header.Set(HeaderAttempt, strconv.Itoa(attempt))
+
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	// Drain and close so the connection to the proxy returns to the pool.
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, MaxResponseBodyBytes))
+	return resp, nil
+}
+
+// TestUpstreamRequestIsNotReplayedAfterAReset pins one forwarded attempt to
+// exactly one upstream request.
+//
+// The forwarded request carries the client's Idempotency-Key, so
+// http.Transport considers it replayable and would re-send it when a pooled
+// upstream connection dies. That would apply the operation a second time
+// behind the oracle's back, which is indistinguishable from the application
+// bug this tool exists to detect.
+func TestUpstreamRequestIsNotReplayedAfterAReset(t *testing.T) {
+	leaktest.Check(t)
+	up := startResettingUpstream(t)
+	p := startProxy(t, up.baseURL, nil)
+	hc := proxyClient(t)
+
+	resp, err := sendWithIdempotencyKey(t, hc, p.BaseURL(), "case-warm", 1)
+	if err != nil {
+		t.Fatalf("warmup request: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("warmup status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	before := up.requests.Load()
+
+	// This one reuses the pooled upstream connection, which the upstream
+	// resets after reading the request in full.
+	resp, err = sendWithIdempotencyKey(t, hc, p.BaseURL(), "case-reset", 1)
+
+	if got := up.requests.Load() - before; got != 1 {
+		t.Errorf("upstream saw %d request(s) for one forwarded attempt, want 1: a replay applies "+
+			"the operation again behind the oracle's back", got)
+	}
+	switch {
+	case err != nil:
+		// The failure reached the caller, which is what must happen.
+	case resp.StatusCode != http.StatusBadGateway:
+		t.Errorf("proxy returned status %d after a lost upstream response, want %d",
+			resp.StatusCode, http.StatusBadGateway)
 	}
 }

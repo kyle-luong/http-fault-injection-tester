@@ -314,6 +314,14 @@ func (p *Proxy) forward(r *http.Request, body []byte, caseID string) (*http.Resp
 	req.ContentLength = int64(len(body))
 	req.Host = target.Host
 
+	// One client request must forward exactly once. The upstream request
+	// carries the client's Idempotency-Key, which makes http.Transport treat it
+	// as replayable; a reset or stale pooled connection would then re-apply the
+	// operation upstream without the harness knowing, corrupting the very state
+	// the oracle reads. Clearing GetBody forbids that replay. See the matching
+	// comment in internal/client.
+	req.GetBody = nil
+
 	p.forwarded.Add(1)
 	resp, err := p.transport.RoundTrip(req)
 	if err != nil {
