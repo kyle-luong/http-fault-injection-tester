@@ -218,6 +218,30 @@ Avoid arbitrary test-count or coverage quotas; use acceptance coverage: all docu
 
 ## 7. CI and Git policy
 
+### Project override: solo main-first flow (this repository, 2026-11-10)
+
+This repository develops on `main`. Routine work is committed directly to it;
+there is no feature branch and no pull request. The owner chose this because the
+project is solo, and it supersedes the pull-request step in the flow diagram
+above, steps 4 and 9 of section 4, and the feature-branch and PR bullets below
+**for this repository only**. Other projects on this shared workflow are
+unaffected.
+
+The pull request was never the actual gate, so what it protected is retained:
+
+- `./scripts/verify-full.sh` must pass before each commit to `main`. The check
+  that used to run in pull-request CI now runs before the commit exists.
+- CI still runs on every push to `main`.
+- Substantial changes still get an independent fresh-context review
+  (section 4, step 7). The evidence a PR description used to carry goes in the
+  commit message and `docs/STATUS.md` instead.
+- History stays append-only: no force-push, and no rewriting of commits that
+  have been published.
+
+This section does not state a policy on commit dates. The project rule that
+dates must record when work actually happened lives in `CLAUDE.md`, and an
+unresolved owner decision about it is recorded in `docs/STATUS.md`.
+
 - Feature branches: `feat/C-03-snapshots`, `feat/GO-05-replay`, `feat/CPP-06-crash-injection`.
 - Commits represent genuine milestones or coherent changes; no contrived commit splitting.
 - Workflow uses `push` to `main` and `pull_request`, with no credentials for internet APIs. Set `permissions: contents: read` by default.

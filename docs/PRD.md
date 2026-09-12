@@ -243,7 +243,7 @@ This tool can intentionally damage request semantics. Default `run` must start l
 - No unexpected public network access or secret leakage; loopback-only and resource bounds are enforced by code.
 - Versioned JSON scenario/results and two examples are documented, validated, and stable for v1.
 - Performance benchmark has documented baseline/workload/host and measured, not invented, numbers.
-- Independent review checks concurrency/cancellation and HTTP connection semantics; human merges the PR.
+- Independent review checks concurrency/cancellation and HTTP connection semantics; the owner approves before the work lands on `main` (see the project override in `00_SHARED_AGENTIC_ENGINEERING_WORKFLOW.md` section 7).
 
 ## 7. LATER extensions
 

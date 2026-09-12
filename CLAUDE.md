@@ -14,10 +14,22 @@ implementation or test double exists.
 
 ## Verification
 - `./scripts/verify.sh` — gofmt, go vet, go build, go test. Run on every edit batch.
-- `./scripts/verify-full.sh` — adds `go test -race` and the integration suite. Run before any PR.
+- `./scripts/verify-full.sh` — adds `go test -race` and the integration suite.
+  Run before every commit. Development is main-first, so this is the only gate.
 Never weaken, skip, or delete a test to obtain a pass. Never change acceptance
 criteria to match the implementation; stop and escalate the contradiction instead.
 Maximum two autonomous repair cycles per distinct persistent failure, then report evidence.
+A flaky test is a defect, not noise: find the cause. Concurrency defects in this
+repository have surfaced only under full-suite load, so a green single-package
+run is not evidence. Repeat the race suite before trusting a concurrency fix.
+
+## Independent review
+Substantial changes get an independent, fresh-context review before they are
+committed: concurrency and cancellation, HTTP connection semantics, wire
+formats, public interfaces, or any change touching more than three packages.
+Give the reviewer the task contract, the diff, and the test evidence, not the
+reasoning that produced them. Record in `docs/STATUS.md` that the review ran
+and what it changed. A review never substitutes for `verify-full.sh`.
 
 ## Safety rules (non-negotiable)
 This tool deliberately breaks HTTP request semantics and can duplicate side effects.
@@ -36,10 +48,13 @@ Close and drain response bodies. Shut down every listener and goroutine you star
 tests assert no goroutine leaks.
 
 ## Git
-Work on a task branch; leave `main` alone. Do not force-push, merge, or push without being asked.
+Development is main-first: commit directly to `main`, with no feature branch and
+no pull request for routine work. `./scripts/verify-full.sh` must pass first.
+Do not force-push, rewrite published commits, or push without being asked.
 Commit only verified milestones, with descriptive subjects under 10 words
 and no conventional-commit prefixes or tool names.
-Never fabricate commit author/committer dates (`docs/00_SHARED_AGENTIC_ENGINEERING_WORKFLOW.md` §7).
+Commit dates must record when the work actually happened. Changing them is the
+owner's call, not an agent's; see the open question in `docs/STATUS.md`.
 
 ## Human approval required
 Architecture or wire-format changes, new dependencies, scope expansion,
