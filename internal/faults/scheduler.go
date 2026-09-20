@@ -144,7 +144,11 @@ type Schedule struct {
 
 	mu        sync.Mutex
 	decisions []Decision
-	dropped   int
+	// byCase indexes the same decisions by case so that a run of thousands of
+	// cases does not scan the whole log once per case. It holds no decision the
+	// ordered log dropped, so the two never disagree.
+	byCase  map[string][]Decision
+	dropped int
 }
 
 // NewSchedule validates the rule set and returns a ready schedule. Two rules
@@ -170,7 +174,10 @@ func NewSchedule(rules []Rule) (*Schedule, error) {
 		seen[k] = struct{}{}
 	}
 
-	return &Schedule{rules: append([]Rule(nil), rules...)}, nil
+	return &Schedule{
+		rules:  append([]Rule(nil), rules...),
+		byCase: make(map[string][]Decision),
+	}, nil
 }
 
 // Decide returns the fault to inject for one attempt at one stage, recording it
@@ -193,6 +200,7 @@ func (s *Schedule) Decide(caseID string, attempt int, stage Stage) (Decision, bo
 	}
 	if len(s.decisions) < maxRecordedDecisions {
 		s.decisions = append(s.decisions, d)
+		s.byCase[caseID] = append(s.byCase[caseID], d)
 	} else {
 		s.dropped++
 	}
@@ -229,12 +237,10 @@ func (s *Schedule) Decisions() []Decision {
 func (s *Schedule) DecisionsForCase(caseID string) []Decision {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]Decision, 0, len(s.decisions))
-	for _, d := range s.decisions {
-		if d.CaseID == caseID {
-			out = append(out, d)
-		}
-	}
+	// The result stays a non-nil slice even when empty, so a case with no
+	// injected faults marshals as [] rather than null.
+	out := make([]Decision, len(s.byCase[caseID]))
+	copy(out, s.byCase[caseID])
 	return out
 }
 

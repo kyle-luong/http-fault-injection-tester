@@ -411,3 +411,63 @@ func TestCaseDeadlineIsRespected(t *testing.T) {
 		t.Errorf("case took %s; the deadline should have ended it much sooner", elapsed)
 	}
 }
+
+// TestHundredCasesAtTwoParallelisms covers GO-T09: 100 independent cases at
+// parallelism 1 and 16, with no shared-state contamination.
+//
+// The backend-side request count is the sharpest assertion here. Each case
+// must apply exactly two operations, one lost and one retried, so the fixture
+// must see exactly 200 operation requests. A contaminated case, a replayed
+// request or a case that leaked into another's state all break that number.
+func TestHundredCasesAtTwoParallelisms(t *testing.T) {
+	for _, parallel := range []int{1, 16} {
+		t.Run(fmt.Sprintf("parallel=%d", parallel), func(t *testing.T) {
+			leaktest.Check(t)
+			sc := loadScenario(t, "lost-response.json")
+			env := setupEnv(t, sc, runner.Options{})
+
+			const cases = 100
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+
+			summary, err := env.Run(ctx, runner.RunSpec{Runs: cases, Parallel: parallel})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			if summary.Executed != cases {
+				t.Fatalf("executed %d cases, want %d", summary.Executed, cases)
+			}
+			if summary.Failed != cases {
+				t.Fatalf("failed=%d passed=%d inconclusive=%d infrastructure=%d, want %d failures",
+					summary.Failed, summary.Passed, summary.Inconclusive,
+					summary.HarnessErrors, cases)
+			}
+			if summary.MaxConcurrentCases > parallel {
+				t.Errorf("peak concurrency %d exceeded the bound of %d",
+					summary.MaxConcurrentCases, parallel)
+			}
+			if summary.DroppedDecisions != 0 {
+				t.Errorf("%d fault decisions were dropped; the recorded history is incomplete",
+					summary.DroppedDecisions)
+			}
+
+			for _, o := range summary.Outcomes {
+				if got := o.Verification.Observed.Counter; got != 2 {
+					t.Errorf("%s counter = %d, want 2: case state was not isolated", o.CaseID, got)
+				}
+				if got := len(o.Verification.Observed.Operations); got != 2 {
+					t.Errorf("%s applied %d operations, want 2", o.CaseID, got)
+				}
+				if got := env.Fixture().CaseOperationRequests(o.CaseID); got != 2 {
+					t.Errorf("%s reached the backend %d times, want 2", o.CaseID, got)
+				}
+			}
+
+			if got := env.Fixture().OperationRequests(); got != 2*cases {
+				t.Errorf("fixture handled %d operation requests in total, want %d",
+					got, 2*cases)
+			}
+		})
+	}
+}

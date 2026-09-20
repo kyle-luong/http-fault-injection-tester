@@ -21,9 +21,10 @@ scenario JSON → validator → runner → test client → fault proxy → test 
 
 ## Status
 
-Milestone M1 of five is complete: the lost-response path works end to end and is
-covered by tests. See [`docs/MILESTONES.md`](docs/MILESTONES.md) for what each
-later milestone adds, and [`docs/STATUS.md`](docs/STATUS.md) for current state.
+Milestones M1 and M2 of five are complete: the lost-response path works end to
+end, and cases run concurrently under a bounded worker pool. See
+[`docs/MILESTONES.md`](docs/MILESTONES.md) for what each later milestone adds,
+and [`docs/STATUS.md`](docs/STATUS.md) for current state.
 
 ## Requirements
 
@@ -81,6 +82,35 @@ oracle distinguishes them.
 Other shipped scenarios: `no-fault-baseline.json` (proves no false positive),
 `reject-before-forward.json` (a failure the backend never saw), and
 `delayed-response.json` (a response stalled past the client's timeout).
+
+## Running many cases
+
+Each case gets its own identifier, its own isolated fixture state and its own
+deadline, so cases can run concurrently without contaminating one another.
+
+```console
+$ ./faulttest run --scenario scenarios/lost-response.json --runs 500 --parallel 16
+Scenario: lost-response | Fixture: unsafe-counter
+Cases: 500  Passed: 0  Failed: 500  Inconclusive: 0  Infrastructure: 0
+Parallelism: 16  Duration: 210ms  Throughput: 2375.3 cases/sec
+```
+
+That throughput line is one real run on a busy laptop; it moves by a factor
+of three with host load, so treat it as an illustration of the output rather
+than a figure to quote.
+
+`--parallel` is a hard ceiling on cases in flight, not a target: it bounds
+goroutines, sockets and load on the fixture together. Passing cases are
+counted, not printed; only cases that need explaining produce output, capped so
+a large run cannot bury its own summary.
+
+Interrupting a run stops new cases from starting. Cases already in flight end
+as inconclusive rather than as findings, because a case that was cut short
+proves nothing about the application — but a violation found before the
+interrupt is still reported, and still sets exit code 1.
+
+Measured throughput, and the reasons to distrust its absolute values, are in
+[`docs/benchmarks/M2-throughput.md`](docs/benchmarks/M2-throughput.md).
 
 ## Exit codes
 
@@ -154,8 +184,12 @@ authorization design, which is out of MVP scope.
 Cleartext HTTP/1.1 only — hard connection control depends on it, and HTTPS
 interception, HTTP/2 and HTTP/3 are out of scope. One logical operation per
 case. One invariant type (`counter_equals`). Only the built-in fixture is
-supported as the application under test. No performance numbers are published
-yet; measurement is M5, and no figure will appear here that was not measured.
+supported as the application under test.
+
+The only performance figures published are the harness throughput numbers in
+[`docs/benchmarks/M2-throughput.md`](docs/benchmarks/M2-throughput.md), which
+were measured on a loaded machine and say so. The proxy-versus-direct
+comparison is M5. No figure appears anywhere here that was not measured.
 
 ## Layout
 

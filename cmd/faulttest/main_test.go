@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kyle-luong/http-fault-injection-tester/internal/runner"
 )
 
 func scenarioPath(name string) string {
@@ -86,7 +88,12 @@ func TestUsageErrorsExitTwo(t *testing.T) {
 		{"missing scenario flag", []string{"run"}},
 		{"nonexistent scenario file", []string{"run", "--scenario", missing}},
 		{"invalid scenario file", []string{"run", "--scenario", bad}},
-		{"unknown flag", []string{"run", "--runs", "500"}},
+		{"unknown flag", []string{"run", "--scenario", scenarioPath("lost-response.json"), "--nope"}},
+		{"runs below the bound", []string{"run", "--scenario", scenarioPath("lost-response.json"), "--runs", "0"}},
+		{"runs past the bound", []string{"run", "--scenario", scenarioPath("lost-response.json"), "--runs", "10001"}},
+		{"parallelism below the bound", []string{"run", "--scenario", scenarioPath("lost-response.json"), "--parallel", "0"}},
+		{"parallelism past the bound", []string{"run", "--scenario", scenarioPath("lost-response.json"), "--parallel", "65"}},
+		{"case id with many runs", []string{"run", "--scenario", scenarioPath("lost-response.json"), "--runs", "2", "--case-id", "c"}},
 		{"stray positional argument", []string{"run", "--scenario", scenarioPath("lost-response.json"), "extra"}},
 		{"zero timeout", []string{"run", "--scenario", scenarioPath("lost-response.json"), "--timeout", "0s"}},
 		{"timeout past the bound", []string{"run", "--scenario", scenarioPath("lost-response.json"), "--timeout", "10m"}},
@@ -147,5 +154,85 @@ func TestCaseIDFlagIsUsed(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Case case-custom:") {
 		t.Errorf("output did not use the supplied case ID:\n%s", stdout.String())
+	}
+}
+
+// TestConcurrentRunReportsAnAggregate covers the reporting half of GO-04: a
+// run of many cases reports totals and measured throughput rather than a wall
+// of per-case output.
+func TestConcurrentRunReportsAnAggregate(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"run", "--scenario", scenarioPath("lost-response-safe.json"),
+		"--runs", "20", "--parallel", "8",
+	}, &stdout, &stderr)
+
+	if code != exitPass {
+		t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitPass, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Cases: 20  Passed: 20  Failed: 0",
+		"Parallelism: 8",
+		"cases/sec",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output did not contain %q:\n%s", want, out)
+		}
+	}
+	// Twenty passing cases must not each print their own block.
+	if n := strings.Count(out, "Case case-"); n != 0 {
+		t.Errorf("printed %d per-case blocks for a run with nothing to explain:\n%s", n, out)
+	}
+}
+
+// TestConcurrentRunBoundsPerCaseDetail keeps a large failing run readable
+// while still naming the failures and returning the finding exit code.
+func TestConcurrentRunBoundsPerCaseDetail(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"run", "--scenario", scenarioPath("lost-response.json"),
+		"--runs", "25", "--parallel", "8",
+	}, &stdout, &stderr)
+
+	if code != exitInvariant {
+		t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitInvariant, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Cases: 25  Passed: 0  Failed: 25") {
+		t.Errorf("output did not report 25 failures:\n%s", out)
+	}
+	if n := strings.Count(out, "Case case-"); n != maxReportedCases {
+		t.Errorf("printed %d per-case blocks, want the cap of %d", n, maxReportedCases)
+	}
+	if !strings.Contains(out, "further case(s) not shown") {
+		t.Errorf("output did not say that cases were omitted:\n%s", out)
+	}
+}
+
+// TestExitCodePrecedence pins the contract that a real finding is never
+// hidden by cases the tool could not establish, including when a run is cut
+// short before every case has started.
+func TestExitCodePrecedence(t *testing.T) {
+	tests := []struct {
+		name    string
+		summary runner.Summary
+		want    int
+	}{
+		{"all passed", runner.Summary{Passed: 10}, exitPass},
+		{"one failed", runner.Summary{Passed: 9, Failed: 1}, exitInvariant},
+		{"failure outranks inconclusive", runner.Summary{Failed: 1, Inconclusive: 5}, exitInvariant},
+		{"failure outranks an interrupted run", runner.Summary{Failed: 1, NotRun: 400, Canceled: true}, exitInvariant},
+		{"inconclusive only", runner.Summary{Passed: 3, Inconclusive: 1}, exitHarness},
+		{"infrastructure only", runner.Summary{Passed: 3, HarnessErrors: 1}, exitHarness},
+		{"cut short with nothing found", runner.Summary{Passed: 3, NotRun: 97, Canceled: true}, exitHarness},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := exitCodeFor(tc.summary); got != tc.want {
+				t.Errorf("exitCodeFor(%+v) = %d, want %d", tc.summary, got, tc.want)
+			}
+		})
 	}
 }
