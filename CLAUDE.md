@@ -53,8 +53,9 @@ no pull request for routine work. `./scripts/verify-full.sh` must pass first.
 Do not force-push, rewrite published commits, or push without being asked.
 Commit only verified milestones, with descriptive subjects under 10 words
 and no conventional-commit prefixes or tool names.
-Commit dates must record when the work actually happened. Changing them is the
-owner's call, not an agent's; see the open question in `docs/STATUS.md`.
+Commit dates: the owner placed the M1-M2 history across August and September
+2026; the decision and what it means are recorded in `docs/STATUS.md`. An agent
+never chooses, sets, or rewrites commit dates on its own. Ask.
 
 ## Human approval required
 Architecture or wire-format changes, new dependencies, scope expansion,

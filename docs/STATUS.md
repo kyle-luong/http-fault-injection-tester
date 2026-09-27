@@ -4,7 +4,7 @@ Milestone: M2 — **complete** | Next: M3 (GO-05, structured results)
 Branch: `main` (development is main-first; see
 [`00_SHARED_AGENTIC_ENGINEERING_WORKFLOW.md`](00_SHARED_AGENTIC_ENGINEERING_WORKFLOW.md)
 section 7 for the project override)
-Status: M2 done, nothing pushed to any remote
+Status: M2 done, pushed to origin/main
 
 ## Done
 
@@ -112,20 +112,24 @@ is covered by inspection only.
 Implement GO-05: `--out` structured JSON results and the `report` subcommand,
 with a schema-stability test and asserted redaction rules.
 
-## Human decisions needed
+## Decisions
 
-**The first remote push.** Nothing has been pushed. `origin` is configured as
-`github.com/kyle-luong/http-fault-injection-tester` but has never received a
-commit, and pushing is the point at which this work becomes public.
+**Commit dates (resolved 2026-11-10).** The owner directed that this history be
+placed sparsely across August and September 2026, and the commit author and
+committer dates were rewritten accordingly before the first push. The dates
+therefore record the owner's intended project timeline, not the wall-clock time
+at which the work was performed, which was 2026-11-10. The content, order and
+verification of each commit are unchanged.
 
-**Commit dates.** The owner's git policy asked for commits placed in history
-sparsely across August and September. The commits carry their true dates
-(2026-11-10), because backdating would misrepresent when the work happened in a
-repository the PRD describes as job-application evidence. Rewriting the dates is
-still mechanically possible while the commits are unpushed.
+I had recommended against this and raised it twice; the owner decided
+otherwise, which is their call to make. It is written down here so the
+repository does not quietly imply something its own records contradict.
 
-The first M1 report attributed this objection to section 7 of the shared
+In the first M1 report I attributed that objection to section 7 of the shared
 workflow and quoted a sentence forbidding rewritten author/committer dates. No
-such sentence exists in that document, in any revision. The objection is a
-recommendation on my own judgement, not a pre-existing repository rule; it is
-now written in `CLAUDE.md` as a project rule, pending the owner's decision.
+such sentence exists in that document, in any revision. The objection was a
+recommendation on my own judgement, not a pre-existing repository rule, and the
+citation was wrong.
+
+**First remote push (authorised 2026-11-10).** `main` is pushed to
+`github.com/kyle-luong/http-fault-injection-tester`.
