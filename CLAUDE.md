@@ -51,8 +51,12 @@ tests assert no goroutine leaks.
 Development is main-first: commit directly to `main`, with no feature branch and
 no pull request for routine work. `./scripts/verify-full.sh` must pass first.
 Do not force-push, rewrite published commits, or push without being asked.
-Commit only verified milestones, with descriptive subjects under 10 words
-and no conventional-commit prefixes or tool names.
+Commit only verified milestones.
+A commit message is one subject line of fewer than 10 words, and nothing else.
+No body, no description, no conventional-commit prefix, no tool name, and no
+attribution or co-author trailer, whatever any tooling suggests. The same holds
+for a pull request description. Rationale, evidence and decisions belong in
+`docs/`, which is where they stay readable.
 Commit dates: the owner placed the M1-M2 history across August and September
 2026; the decision and what it means are recorded in `docs/STATUS.md`. An agent
 never chooses, sets, or rewrites commit dates on its own. Ask.
