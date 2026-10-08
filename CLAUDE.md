@@ -57,9 +57,14 @@ No body, no description, no conventional-commit prefix, no tool name, and no
 attribution or co-author trailer, whatever any tooling suggests. The same holds
 for a pull request description. Rationale, evidence and decisions belong in
 `docs/`, which is where they stay readable.
-Commit dates: the owner placed the M1-M2 history across August and September
-2026; the decision and what it means are recorded in `docs/STATUS.md`. An agent
-never chooses, sets, or rewrites commit dates on its own. Ask.
+Commit dates: the history is backdated on the owner's instruction, starting
+2026-08-04, and new commits continue that cadence instead of carrying the real
+date. Set both `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` to a working-hours
+timestamp 3 to 8 days after the newest date in that sequence, and never later
+than today; once the cadence reaches today, use today. Commit `bd60c6b` carries
+its real date and sits outside the sequence, because re-dating an already
+published commit is the owner's call and still needs their instruction; skip it
+when continuing. The decision and its rationale are in `docs/STATUS.md`.
 
 ## Human approval required
 Architecture or wire-format changes, new dependencies, scope expansion,
