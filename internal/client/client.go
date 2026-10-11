@@ -11,6 +11,8 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -142,9 +144,9 @@ func Execute(ctx context.Context, hc *http.Client, baseURL, caseID string, p Pol
 	if err != nil {
 		return Result{}, fmt.Errorf("build request URL: %w", err)
 	}
-	body, err := json.Marshal(fixture.OperationRequest{CaseID: caseID, Delta: p.Delta})
+	body, err := operationBody(caseID, p.Delta)
 	if err != nil {
-		return Result{}, fmt.Errorf("encode operation body: %w", err)
+		return Result{}, err
 	}
 
 	result := Result{CaseID: caseID}
@@ -254,6 +256,29 @@ func (p Policy) sendOnce(
 		return resp.StatusCode, nil, fmt.Errorf("decode operation response: %w", err)
 	}
 	return resp.StatusCode, &decoded, nil
+}
+
+// operationBody builds the exact bytes every attempt of one case sends.
+func operationBody(caseID string, delta int) ([]byte, error) {
+	body, err := json.Marshal(fixture.OperationRequest{CaseID: caseID, Delta: delta})
+	if err != nil {
+		return nil, fmt.Errorf("encode operation body: %w", err)
+	}
+	return body, nil
+}
+
+// PayloadDigest identifies a case's request payload without recording it: a
+// trace stores the digest instead of the body, and replay recomputes it to show
+// the same input would be sent again. It digests whatever operationBody
+// produces, so the digest cannot come to describe bytes the client no longer
+// sends.
+func PayloadDigest(caseID string, delta int) (string, error) {
+	body, err := operationBody(caseID, delta)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(body)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
 // idempotencyKey derives the attempt's logical operation identity. Reusing the

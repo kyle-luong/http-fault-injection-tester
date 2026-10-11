@@ -66,6 +66,12 @@ func NewRunID() string {
 // that refusal is atomic, so two runs sharing a path cannot both believe they
 // won.
 func Write(path string, overwrite bool, r Result) error {
+	return WriteJSON(path, overwrite, r)
+}
+
+// WriteJSON is Write's mechanism, exported because per-case traces need the
+// same guarantees and must not reimplement them.
+func WriteJSON(path string, overwrite bool, v any) error {
 	dir := filepath.Dir(path)
 	if dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -73,9 +79,9 @@ func Write(path string, overwrite bool, r Result) error {
 		}
 	}
 
-	tmp, err := os.CreateTemp(dir, ".result-*.json")
+	tmp, err := os.CreateTemp(dir, ".tmp-*.json")
 	if err != nil {
-		return fmt.Errorf("create temporary result in %s: %w", dir, err)
+		return fmt.Errorf("create temporary file in %s: %w", dir, err)
 	}
 	tmpName := tmp.Name()
 	// A no-op once the file has been moved into place.
@@ -83,26 +89,26 @@ func Write(path string, overwrite bool, r Result) error {
 
 	enc := json.NewEncoder(tmp)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(r); err != nil {
+	if err := enc.Encode(v); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("write result %s: %w", path, err)
+		return fmt.Errorf("write %s: %w", path, err)
 	}
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("set result permissions %s: %w", path, err)
+		return fmt.Errorf("set permissions on %s: %w", path, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temporary result for %s: %w", path, err)
+		return fmt.Errorf("close temporary file for %s: %w", path, err)
 	}
 
 	if overwrite {
 		if err := os.Rename(tmpName, path); err != nil {
-			return fmt.Errorf("write result %s: %w", path, err)
+			return fmt.Errorf("write %s: %w", path, err)
 		}
 		return nil
 	}
 	if err := os.Link(tmpName, path); err != nil {
-		return fmt.Errorf("write result %s: %w", path, err)
+		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
 }

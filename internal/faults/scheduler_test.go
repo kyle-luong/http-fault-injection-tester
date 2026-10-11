@@ -2,6 +2,7 @@ package faults
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -245,6 +246,43 @@ func TestDecisionLogIsBounded(t *testing.T) {
 	}
 	if got := sched.DroppedDecisions(); got != 10 {
 		t.Errorf("DroppedDecisions() = %d, want 10 so replay can tell the log is incomplete", got)
+	}
+}
+
+// TestPerCaseDecisionsSurviveTheLogBound is the defect the bound above used to
+// cause. A case whose decisions fell past the whole-run bound recorded an empty
+// list, and an empty list does not read as "truncated" -- it reads as "no fault
+// was injected". A trace written from one replayed clean and reported that it
+// had reproduced the run.
+//
+// Two faults per case and 10,000 cases is inside the documented CLI bounds, so
+// this was reachable without any hand-editing.
+func TestPerCaseDecisionsSurviveTheLogBound(t *testing.T) {
+	sched, err := NewSchedule([]Rule{
+		{Attempt: 1, Stage: StageBeforeForward, Action: ActionRejectConnection},
+	})
+	if err != nil {
+		t.Fatalf("NewSchedule: %v", err)
+	}
+
+	const cases = maxRecordedDecisions + 100
+	for i := range cases {
+		sched.Decide(fmt.Sprintf("case-%05d", i+1), 1, StageBeforeForward)
+	}
+
+	if got := sched.DroppedDecisions(); got != 100 {
+		t.Fatalf("DroppedDecisions() = %d, want 100", got)
+	}
+	// The last case is well past the bound, which is exactly where the record
+	// used to be lost.
+	last := fmt.Sprintf("case-%05d", cases)
+	decisions := sched.DecisionsForCase(last)
+	if len(decisions) != 1 {
+		t.Fatalf("DecisionsForCase(%s) returned %d decisions, want 1; a case past the "+
+			"whole-run log bound still has its own history", last, len(decisions))
+	}
+	if decisions[0].Action != ActionRejectConnection || decisions[0].Attempt != 1 {
+		t.Errorf("DecisionsForCase(%s)[0] = %+v, want the injected rule", last, decisions[0])
 	}
 }
 

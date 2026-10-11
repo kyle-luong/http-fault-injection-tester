@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -378,5 +379,404 @@ func TestOutRefusesAnUnwritablePathBeforeRunning(t *testing.T) {
 	}
 	if stdout.Len() != 0 {
 		t.Errorf("a run executed before the path was refused:\n%s", stdout.String())
+	}
+}
+
+// TestRunWritesTracesAndReplayReproducesThem covers GO-T14 for the replay
+// command: the trace an operator is told to replay must actually replay, and
+// the replayed verdict must carry the same exit code the run reported.
+func TestRunWritesTracesAndReplayReproducesThem(t *testing.T) {
+	cases := []struct {
+		scenario string
+		wantCode int
+	}{
+		{"lost-response.json", exitInvariant},
+		{"lost-response-safe.json", exitPass},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.scenario, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "traces")
+
+			var runOut, runErr bytes.Buffer
+			code := run([]string{
+				"run", "--scenario", scenarioPath(tc.scenario), "--runs", "2", "--traces", dir,
+			}, &runOut, &runErr)
+			if code != tc.wantCode {
+				t.Fatalf("run exit code = %d, want %d; stderr:\n%s", code, tc.wantCode, runErr.String())
+			}
+			if !strings.Contains(runOut.String(), "Traces: "+dir) {
+				t.Errorf("run did not report where it wrote traces:\n%s", runOut.String())
+			}
+
+			tracePath := filepath.Join(dir, "case-0002.json")
+			if _, err := os.Stat(tracePath); err != nil {
+				t.Fatalf("expected one trace per case: %v", err)
+			}
+
+			var repOut, repErr bytes.Buffer
+			if code := run([]string{"replay", "--trace", tracePath}, &repOut, &repErr); code != tc.wantCode {
+				t.Fatalf("replay exit code = %d, want %d; stderr:\n%s", code, tc.wantCode, repErr.String())
+			}
+			for _, want := range []string{"Replaying case-0002", "Replay reproduced"} {
+				if !strings.Contains(repOut.String(), want) {
+					t.Errorf("replay output did not contain %q:\n%s", want, repOut.String())
+				}
+			}
+		})
+	}
+}
+
+// TestRunPointsAtTheTraceOfAFailingCase checks the PRD's reproduce line, which
+// is the only way an operator learns that replay exists.
+func TestRunPointsAtTheTraceOfAFailingCase(t *testing.T) {
+	dir := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	run([]string{
+		"run", "--scenario", scenarioPath("lost-response.json"), "--runs", "2", "--traces", dir,
+	}, &stdout, &stderr)
+
+	want := "Reproduce: faulttest replay --trace " + filepath.Join(dir, "case-0001.json")
+	if !strings.Contains(stdout.String(), want) {
+		t.Errorf("output did not contain %q:\n%s", want, stdout.String())
+	}
+
+	// A clean run has nothing to reproduce, so the line would be noise.
+	var passOut, passErr bytes.Buffer
+	run([]string{
+		"run", "--scenario", scenarioPath("no-fault-baseline.json"), "--traces", t.TempDir(),
+	}, &passOut, &passErr)
+	if strings.Contains(passOut.String(), "Reproduce:") {
+		t.Errorf("a passing run suggested reproducing a case:\n%s", passOut.String())
+	}
+}
+
+// TestReplayRejectsUnusableTraces covers the PRD's exit-code table, which
+// classifies a corrupted trace as infrastructure failure rather than as a
+// finding about the application.
+func TestReplayRejectsUnusableTraces(t *testing.T) {
+	dir := t.TempDir()
+
+	var runOut, runErr bytes.Buffer
+	run([]string{
+		"run", "--scenario", scenarioPath("lost-response.json"), "--traces", dir,
+	}, &runOut, &runErr)
+	good, err := os.ReadFile(filepath.Join(dir, "case-0001.json"))
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+
+	write := func(t *testing.T, data []byte) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "trace.json")
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatalf("write trace: %v", err)
+		}
+		return path
+	}
+
+	t.Run("missing file", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"replay", "--trace",
+			filepath.Join(t.TempDir(), "absent.json")}, &stdout, &stderr); code != exitHarness {
+			t.Errorf("exit code = %d, want %d", code, exitHarness)
+		}
+	})
+	t.Run("not a trace", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"replay", "--trace",
+			write(t, []byte("garbage"))}, &stdout, &stderr); code != exitHarness {
+			t.Errorf("exit code = %d, want %d", code, exitHarness)
+		}
+	})
+	t.Run("truncated", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"replay", "--trace",
+			write(t, good[:len(good)/2])}, &stdout, &stderr); code != exitHarness {
+			t.Errorf("exit code = %d, want %d", code, exitHarness)
+		}
+	})
+	t.Run("unsupported version", func(t *testing.T) {
+		bumped := bytes.Replace(good, []byte(`"schema_version": 1`), []byte(`"schema_version": 2`), 1)
+		if bytes.Equal(bumped, good) {
+			t.Fatal("could not change the trace's schema version")
+		}
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"replay", "--trace", write(t, bumped)}, &stdout, &stderr); code != exitHarness {
+			t.Errorf("exit code = %d, want %d", code, exitHarness)
+		}
+		if !strings.Contains(stderr.String(), "schema_version") {
+			t.Errorf("stderr did not name the problem:\n%s", stderr.String())
+		}
+	})
+}
+
+// TestReplayReportsAMismatchAsInfrastructure pins the exit-code boundary: a
+// replay that does not reproduce its record is this tool failing to reproduce
+// itself, not the application violating an invariant.
+func TestReplayReportsAMismatchAsInfrastructure(t *testing.T) {
+	dir := t.TempDir()
+
+	var runOut, runErr bytes.Buffer
+	if code := run([]string{
+		"run", "--scenario", scenarioPath("lost-response.json"), "--traces", dir,
+	}, &runOut, &runErr); code != exitInvariant {
+		t.Fatalf("run exit code = %d, want %d", code, exitInvariant)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "case-0001.json"))
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		edit func(m map[string]any)
+		want string
+	}{
+		{
+			// The recorded verdict is wrong, everything else reproduces.
+			"recorded verdict edited",
+			func(m map[string]any) { m["expected"].(map[string]any)["verdict"] = "pass" },
+			"verdict: replayed fail; recorded pass",
+		},
+		{
+			// The trace claims nothing was injected, so replay must inject
+			// nothing and the case must come out clean. If replay fell back to
+			// the scenario's own rules it would reproduce the failure instead
+			// and this mismatch would read differently.
+			"recorded decisions removed",
+			func(m map[string]any) { m["fault_decisions"] = []any{} },
+			"verdict: replayed pass; recorded fail",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var m map[string]any
+			if err := json.Unmarshal(data, &m); err != nil {
+				t.Fatalf("decode trace: %v", err)
+			}
+			tc.edit(m)
+			doctored, err := json.Marshal(m)
+			if err != nil {
+				t.Fatalf("encode trace: %v", err)
+			}
+			path := filepath.Join(t.TempDir(), "case-0001.json")
+			if err := os.WriteFile(path, doctored, 0o600); err != nil {
+				t.Fatalf("write trace: %v", err)
+			}
+
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"replay", "--trace", path}, &stdout, &stderr); code != exitHarness {
+				t.Fatalf("exit code = %d, want %d; stdout:\n%s", code, exitHarness, stdout.String())
+			}
+			for _, want := range []string{"did not reproduce", tc.want} {
+				if !strings.Contains(stdout.String(), want) {
+					t.Errorf("output did not contain %q:\n%s", want, stdout.String())
+				}
+			}
+		})
+	}
+}
+
+// TestReplayUsageErrors keeps argument mistakes at exit 2, away from both
+// findings and infrastructure failures.
+func TestReplayUsageErrors(t *testing.T) {
+	cases := [][]string{
+		{"replay"},
+		{"replay", "--trace", ""},
+		{"replay", "--trace", "x.json", "extra"},
+		{"replay", "--trace", "x.json", "--timeout", "0s"},
+	}
+	for _, args := range cases {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run(args, &stdout, &stderr); code != exitUsage {
+				t.Errorf("exit code = %d, want %d", code, exitUsage)
+			}
+		})
+	}
+}
+
+// TestTraceFilesCarryNoRequestPayloads is the written-artefact half of the
+// redaction rule. The embedded scenario's synthetic delta is permitted
+// configuration; captured request data is not.
+func TestTraceFilesCarryNoRequestPayloads(t *testing.T) {
+	dir := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	run([]string{
+		"run", "--scenario", scenarioPath("lost-response.json"), "--traces", dir,
+	}, &stdout, &stderr)
+
+	data, err := os.ReadFile(filepath.Join(dir, "case-0001.json"))
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+
+	risky := regexp.MustCompile(`(?i)"[a-z_]*(header|body|cookie|auth|token|secret|password|credential)[a-z_]*"\s*:`)
+	if found := risky.FindAllString(string(data), -1); found != nil {
+		t.Errorf("trace file contains field(s) that suggest request data: %v", found)
+	}
+	if strings.Contains(string(data), `"idempotency_key"`) {
+		t.Error("trace file recorded a request header value")
+	}
+}
+
+// TestTracesRefuseAnExistingFileBeforeRunning keeps the refusal ahead of the
+// work, so a rerun into a used directory costs nothing.
+func TestTracesRefuseAnExistingFileBeforeRunning(t *testing.T) {
+	dir := t.TempDir()
+	// case-0004 is outside the three cases this run plans, so the refusal
+	// cannot come from an accidental overlap -- and an off-by-one in the
+	// planned case IDs cannot pass this by chance.
+	if err := os.WriteFile(filepath.Join(dir, "case-0004.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("seed trace: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"run", "--scenario", scenarioPath("lost-response.json"), "--runs", "3", "--traces", dir,
+	}, &stdout, &stderr); code != exitUsage {
+		t.Fatalf("exit code = %d, want %d", code, exitUsage)
+	}
+	if strings.Contains(stdout.String(), "Cases:") {
+		t.Errorf("the run executed before refusing the trace directory:\n%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--overwrite") {
+		t.Errorf("stderr did not say how to proceed:\n%s", stderr.String())
+	}
+}
+
+// TestCaseIDTraceIsWrittenUnderThatID pins the --case-id path through the
+// planned-case-ID list, which decides what the pre-run check looks for.
+func TestCaseIDTraceIsWrittenUnderThatID(t *testing.T) {
+	dir := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"run", "--scenario", scenarioPath("lost-response.json"),
+		"--case-id", "my-case", "--traces", dir,
+	}, &stdout, &stderr); code != exitInvariant {
+		t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitInvariant, stderr.String())
+	}
+
+	path := filepath.Join(dir, "my-case.json")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("trace for --case-id was not written as my-case.json: %v", err)
+	}
+	// And the pre-run check must look for that name, not case-0001.
+	var again bytes.Buffer
+	if code := run([]string{
+		"run", "--scenario", scenarioPath("lost-response.json"),
+		"--case-id", "my-case", "--traces", dir,
+	}, &again, &again); code != exitUsage {
+		t.Errorf("a rerun into the same directory exited %d, want %d", code, exitUsage)
+	}
+
+	var repOut, repErr bytes.Buffer
+	if code := run([]string{"replay", "--trace", path}, &repOut, &repErr); code != exitInvariant {
+		t.Fatalf("replay exit code = %d, want %d; stderr:\n%s", code, exitInvariant, repErr.String())
+	}
+	if !strings.Contains(repOut.String(), "Replaying my-case") {
+		t.Errorf("replay did not run the recorded case:\n%s", repOut.String())
+	}
+}
+
+// TestTracesThatCannotBeWrittenDoNotReportACleanRun covers the rule that a
+// run whose traces never arrived is unreproducible, so it must not exit 0.
+func TestTracesThatCannotBeWrittenDoNotReportACleanRun(t *testing.T) {
+	dir := t.TempDir()
+	// A directory where the trace file belongs: the pre-run probe succeeds,
+	// and --overwrite skips the existence refusal, so the failure lands at
+	// write time -- which is the path under test.
+	if err := os.Mkdir(filepath.Join(dir, "case-0001.json"), 0o755); err != nil {
+		t.Fatalf("seed directory: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"run", "--scenario", scenarioPath("no-fault-baseline.json"),
+		"--traces", dir, "--overwrite",
+	}, &stdout, &stderr)
+	if code != exitHarness {
+		t.Fatalf("exit code = %d, want %d: the scenario passes, but its traces were never "+
+			"written; stderr:\n%s", code, exitHarness, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "could not write traces") {
+		t.Errorf("stderr did not report the failure:\n%s", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Traces: ") {
+		t.Errorf("output claimed traces were written:\n%s", stdout.String())
+	}
+}
+
+// TestEmptyOutputPathsAreRejected keeps --out="$UNSET" from reading as "no
+// output requested" in a CI script.
+func TestEmptyOutputPathsAreRejected(t *testing.T) {
+	for _, flag := range []string{"--out", "--traces"} {
+		t.Run(flag, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{
+				"run", "--scenario", scenarioPath("no-fault-baseline.json"), flag + "=",
+			}, &stdout, &stderr)
+			if code != exitUsage {
+				t.Errorf("exit code = %d, want %d", code, exitUsage)
+			}
+			if strings.Contains(stdout.String(), "Cases:") {
+				t.Errorf("the run executed before refusing the empty path:\n%s", stdout.String())
+			}
+		})
+	}
+}
+
+// TestOutInsideTracesIsRejected: the result file would land on a trace file,
+// destroying the one the run's own Reproduce line points at.
+func TestOutInsideTracesIsRejected(t *testing.T) {
+	dir := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"run", "--scenario", scenarioPath("lost-response.json"), "--runs", "2",
+		"--traces", dir, "--out", filepath.Join(dir, "case-0002.json"), "--overwrite",
+	}, &stdout, &stderr)
+	if code != exitUsage {
+		t.Fatalf("exit code = %d, want %d", code, exitUsage)
+	}
+	if strings.Contains(stdout.String(), "Cases:") {
+		t.Errorf("the run executed before refusing the collision:\n%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), dir) {
+		t.Errorf("stderr did not name the collision:\n%s", stderr.String())
+	}
+}
+
+// TestReplayUsesTheDeadlineFromTheTrace checks the CLI wiring of the recorded
+// deadline. Without it the replay runs under the default 5s, the delayed case
+// comes out pass instead of inconclusive, and the output says the record did
+// not reproduce.
+func TestReplayUsesTheDeadlineFromTheTrace(t *testing.T) {
+	dir := t.TempDir()
+
+	var runOut, runErr bytes.Buffer
+	if code := run([]string{
+		"run", "--scenario", scenarioPath("delayed-response.json"),
+		"--timeout", "100ms", "--traces", dir,
+	}, &runOut, &runErr); code != exitHarness {
+		t.Fatalf("run exit code = %d, want %d (inconclusive); stdout:\n%s", code, exitHarness, runOut.String())
+	}
+
+	var repOut, repErr bytes.Buffer
+	code := run([]string{"replay", "--trace", filepath.Join(dir, "case-0001.json")}, &repOut, &repErr)
+	if !strings.Contains(repOut.String(), "Replay reproduced") {
+		t.Errorf("replay did not reproduce the recorded case (exit %d):\n%s", code, repOut.String())
+	}
+	if !strings.Contains(repOut.String(), "deadline 100ms") {
+		t.Errorf("replay did not report the recorded deadline:\n%s", repOut.String())
+	}
+	if code != exitHarness {
+		t.Errorf("exit code = %d, want %d: an inconclusive case stays indeterminate", code, exitHarness)
 	}
 }

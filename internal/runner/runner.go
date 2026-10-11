@@ -45,6 +45,13 @@ type Options struct {
 	// SettleTimeout bounds the wait for upstream quiescence. Zero selects
 	// DefaultSettleTimeout.
 	SettleTimeout time.Duration
+	// Rules replaces the scenario's own fault rules. Replay passes the
+	// decisions a trace recorded so that the run injects exactly those, rather
+	// than re-deriving them from the scenario and thereby being unable to
+	// notice a trace that no longer matches it. A nil slice means the
+	// scenario's rules; an empty non-nil slice means no faults at all, which is
+	// what a trace of a case that was never faulted asks for.
+	Rules []faults.Rule
 }
 
 // Outcome is everything observed for one case.
@@ -102,9 +109,12 @@ func Setup(sc *scenario.Scenario, opts Options) (*Env, error) {
 	if err != nil {
 		return nil, err
 	}
-	rules, err := sc.Rules()
-	if err != nil {
-		return nil, err
+	rules := opts.Rules
+	if rules == nil {
+		rules, err = sc.Rules()
+		if err != nil {
+			return nil, err
+		}
 	}
 	schedule, err := faults.NewSchedule(rules)
 	if err != nil {
@@ -150,6 +160,11 @@ func Setup(sc *scenario.Scenario, opts Options) (*Env, error) {
 // Fixture exposes the running fixture so tests can assert on backend-side
 // observations such as how many requests actually arrived.
 func (e *Env) Fixture() *fixture.Server { return e.fixture }
+
+// CaseTimeout is the per-case deadline this Env enforces, after defaults have
+// been applied. A trace records it because the deadline decides outcomes: a
+// case replayed under a different one is not the same case.
+func (e *Env) CaseTimeout() time.Duration { return e.caseTimeout }
 
 // Proxy exposes the running proxy.
 func (e *Env) Proxy() *proxy.Proxy { return e.proxy }

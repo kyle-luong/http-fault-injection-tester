@@ -1,10 +1,11 @@
 # Current state
 
-Milestone: M3 — **complete** | Next: M4 (per-case traces and `replay`)
+Milestone: M4 — **complete** | Next: M5 (resource-limit hardening and the
+direct-versus-proxy benchmark)
 Branch: `main` (development is main-first; see
 [`00_SHARED_AGENTIC_ENGINEERING_WORKFLOW.md`](00_SHARED_AGENTIC_ENGINEERING_WORKFLOW.md)
 section 7 for the project override)
-Status: M3 done and pushed
+Status: M4 verified and reviewed
 
 ## Done
 
@@ -19,24 +20,32 @@ $ ./faulttest run --scenario scenarios/lost-response-safe.json # safe:    counte
 
 M2 adds concurrent execution: `--runs N` independent cases, each with its own
 identifier, isolated state and deadline, and `--parallel N` as a hard ceiling
-enforced by a fixed worker pool. Isolation, reproducibility across parallelism,
-and cancellation that never gives a verdict to a cut-short case are each
-asserted rather than assumed.
+enforced by a fixed worker pool.
 
-M3 adds the durable record. `--out PATH` writes the structured result JSON —
-verdict, attempts, injected fault decisions and observed state for every case,
-plus a schema version and run ID — and `report PATH` prints the same summary
-and returns the same exit code from a saved file without executing anything.
-An existing or unwritable path is refused before the run starts, not after.
+M3 adds the durable record: `--out PATH` writes the structured result JSON, and
+`report PATH` prints the same summary and exit code from a saved file without
+executing anything.
 
-Two properties of the result file are load-bearing:
+M4 makes a single case reproducible. `--traces DIR` writes one trace file per
+case, and `faulttest replay --trace DIR/case-0001.json` rebuilds the fixture
+from that file alone, injects the decisions it recorded, and compares the replay
+with the record on four axes: injected decisions, attempt count, observed state
+and verdict. Format and rationale:
+[`decisions/ADR-002-self-contained-replay-trace.md`](decisions/ADR-002-self-contained-replay-trace.md)
+and [`features/M4-trace-replay.md`](features/M4-trace-replay.md).
 
-- **It is a published interface.** Parsing is strict, the key names are pinned
-  by test, and `proxy.Stats` gained JSON tags so the whole schema is snake_case
-  before v1 ships rather than after.
-- **A result cannot claim more than it establishes.** Parsing rejects a summary
-  whose numbers disagree, because `report` turns a saved result into an exit
-  code and a file full of zeros would otherwise read as a pass.
+Three properties are load-bearing:
+
+- **Replay injects the recorded decisions, not the scenario's rules.** Deriving
+  them again would put both sides of the comparison in the same place, and a
+  trace that no longer described its run could never be detected.
+- **The deadline is part of the record.** `replay` has no `--timeout`. The
+  delayed-response scenario is `inconclusive` under 100ms and `pass` under the
+  5s default, so a replay that substituted its own deadline would reach a
+  different verdict and then blame reproducibility for it.
+- **A mismatch is exit 3, never exit 1.** The tool failing to reproduce itself
+  is infrastructure failure. Exit 1 continues to mean only that the oracle found
+  a violation in the application under test.
 
 ## Evidence
 
@@ -48,60 +57,104 @@ Two properties of the result file are load-bearing:
 | `go vet ./...` | clean |
 | `go test -count=1 ./...` | all packages pass |
 | `go test -race -count=1 ./...` | all packages pass, no races reported |
-| `go test -race -count=1 ./...` × 3 consecutive runs | 0 failures |
+| `go test -race -count=1 ./...` × 4 consecutive runs | 0 failures |
+
+Thirteen mutation checks were run against the new guards, each confirming that
+the test named for a behaviour fails when that behaviour is removed: the
+per-case decision index, the scenario digest, the payload digest, the recorded
+deadline (unit and CLI), the trace schema allowlist, the `--out`-inside-traces
+rule, the empty-path refusal, the failed-trace-write exit code, the
+`recorded_at` requirement, the case-ID path guard, the replay-from-record wiring
+and the mismatch exit code.
 
 Throughput was measured, not estimated:
 [`benchmarks/M2-throughput.md`](benchmarks/M2-throughput.md). The host was
 loaded and the run-to-run spread is threefold, and the document says so instead
 of quoting a median as a benchmark.
 
-### Independent review of M3
+### Independent review of M4
 
-A fresh-context review raised nine findings. The four that mattered were
-reproduced against a built binary before being fixed:
+Two fresh-context reviews ran before the commit, one on the wire format and its
+validation, one on the CLI contract and the quality of the new tests. Between
+them they raised about twenty findings; fifteen led to changes and five are
+recorded as limitations below. The ones that mattered:
 
-1. `Parse` checked only the schema version and run ID, so
-   `{"schema_version":1,"run_id":"x"}` printed a clean run and **exited 0**. A
-   result now has to account for its own cases or it is rejected.
-2. `Write` encoded straight into the destination, so a failure part way through
-   left a truncated file that then blocked the retry, and two `--overwrite`
-   writers could interleave. It now encodes to a temporary file in the same
-   directory and moves it into place, using a hard link when overwrite is off
-   so the refusal is atomic.
-3. The pre-run guard checked existence but not writability, so a run with an
-   unwritable `--out` directory executed in full and then failed. It now probes
-   the directory.
-4. `proxy.Stats` had no JSON tags, emitting `"Requests"` amid an otherwise
-   snake_case schema. Left alone it would have frozen into v1, and strict
-   parsing would make a later rename reject every result already written.
+1. **A trace could record an empty fault log for a case that was faulted.** The
+   per-case decision index stopped growing with the whole-run ordered log at
+   10,000 decisions, so in a run of ~5,000 cases with two faults each — inside
+   the documented `--runs` bound — thousands of traces claimed no fault was
+   injected. Replaying one injected nothing, passed, and printed that it had
+   reproduced the run. The per-case index is now kept whole; it is bounded by
+   the run size times the stages a scenario can declare, not by traffic.
+2. **A two-field edit laundered a recorded violation into a clean pass.**
+   Changing `invariant.expected` and the recorded verdict produced a trace that
+   parsed, replayed and exited 0 while the duplicate side effect was visible in
+   the same output; a third field fabricated an exit 1 against an application
+   that did nothing wrong. A `scenario_digest` now binds the embedded scenario
+   to the file. It catches a partial edit, which is the realistic accident for a
+   file that travels in bug reports; it is not a signature, and the documents
+   now say so instead of implying tamper-evidence.
+3. **The per-case deadline was not recorded**, so replay silently substituted
+   its own default and reported "did not reproduce" for a configuration value
+   that had simply been dropped. It is now `case_timeout_ns` in the trace, and
+   `replay` has no `--timeout`.
+4. **Both redaction tests could not fail.** They denylisted suspicious field
+   *names*; adding a `payload` field holding the request body and an `x_api_key`
+   field holding a credential kept the whole suite green. The schema is frozen
+   for v1 by strict parsing anyway, so the test now pins the permitted key set
+   and fails closed on anything new. **This is the third test of that shape in
+   this repository** — see the known issues below.
+5. **The oversize bound had no working test**: deleting the size check from
+   `Load` left the suite green, because a file of NUL bytes fails to parse
+   whether or not the bound exists. The test now asserts the reason.
+6. **`--out` inside `--traces` destroyed the trace the run's own `Reproduce`
+   line pointed at**, with exit 1 and nothing on stderr. A run now owns its
+   trace directory: `--out` may not point inside it, a directory already holding
+   traces is refused without `--overwrite`, and with `--overwrite` the run warns
+   that traces it did not write are still there describing another run.
 
-Also fixed: the end-to-end redaction test could not fail, since none of its
-forbidden strings could ever appear; it now asserts on field *names* and so
-fails if anything header-, body- or credential-shaped enters the schema. The
-help text claimed the file carries no request headers while the idempotency key
-is deliberately recorded; it now says which value is recorded and why.
-`--overwrite` without `--out` was silently accepted. The oversize test
-materialised 64 MiB per run and now truncates instead.
+Also fixed: three documents and the help text claimed a trace holds no header
+value while `expected.state.operations` holds the idempotency keys the oracle
+read back out of application state — the wording now says what is there and
+where it came from; `expected.attempts` was renamed `attempt_count` so it cannot
+be confused with the result schema's `attempts` array, and
+`expected.observed_state` became `expected.state`; `recorded_at` was effectively
+optional; a state naming another case was accepted; the shared JSON writer
+called every file a "result"; the trace directory was created before the
+scenario was validated; `--traces=` with an empty value was silently ignored;
+and four branches with no test at all got one, including `--case-id` with
+`--traces`, which also let the planned-case-ID list be deleted outright.
 
 ## Not done
 
-M4: per-case trace files and `faulttest replay --trace`, with a
-record-then-replay equivalence test. M5: resource-limit hardening and the
-direct-versus-proxy benchmark (GO-AC13).
+M5: resource-limit hardening and the direct-versus-proxy latency and throughput
+benchmark (GO-AC13, GO-T11–T15), which needs a quiet host.
 
 `--seed` from the PRD's CLI table is not implemented; it exists for randomized
 fault policies, which are a `LATER` item.
 
 ## Known issues / failed approaches
 
+- **A test that forbids a list of names or strings proves nothing.** Three
+  tests in this repository have now had that shape, each written to guard
+  redaction, each unable to fail. The working form is an allowlist of the
+  permitted structure, which fails closed when the schema grows.
 - A green single-package test run is not evidence of concurrency correctness
   here. The transport-replay defect reproduced only under full-suite load, and
   its failing subtest passed six times out of six in isolation.
-- A test that forbids a list of strings proves nothing if none of them can
-  occur. Two tests in this repository had that shape; both now assert on
-  structure instead.
-- Writing a file by encoding into its final path is not atomic, and the
-  resulting stub blocks its own retry.
+- Bounds that protect memory can corrupt records if they are applied to the
+  wrong thing. The decision-log bound was correct for the whole-run log and
+  wrong for the per-case index, and the symptom was a trace that lied rather
+  than a resource problem.
+- Duplicate JSON keys are accepted by scenario, result and trace parsing, with
+  the last value winning, so a crafted file can read one way to a human and
+  execute another. "Strictly parsed" in these documents means unknown keys and
+  trailing content, not duplicate keys.
+- The trace digests cover Go encodings, so a future scenario schema v2 will
+  reject stored v1 traces although the trace format itself did not change.
+- An interrupted run still writes the traces of every case that executed, which
+  for thousands of cases is a noticeable tail, and a second interrupt is
+  swallowed. Pre-existing from M2; `--traces` makes the tail longer.
 - Throughput measurement on a loaded host is worthless for absolute figures:
   the same commit measured 822, 2101 and 2459 cases/sec for one configuration.
 - `.gitignore` originally listed the binary as a bare `faulttest`, which also
@@ -109,19 +162,32 @@ fault policies, which are a `LATER` item.
 
 ## Next action
 
-M4 (GO-06 part 2): write a per-case trace alongside `--out`, add
-`faulttest replay --trace PATH`, and prove by test that a replay injects the
-same decisions and reaches the same oracle outcome. The trace records the
-decisions and a stable payload digest, not request bodies.
+M5 (GO-07): resource-limit tests and the direct-versus-proxy comparison the PRD
+asks for in GO-AC13 — added latency, memory and goroutine counts with the proxy
+in the path versus without. It needs a quiet host to produce figures worth
+publishing, and the method and caveats belong in `docs/benchmarks/` beside the
+M2 numbers.
 
 ## Decisions
 
+**Trace format (2026-11-12).** Self-contained, embedding the validated
+scenario, with the owner's approval and its limits recorded in
+[`decisions/ADR-002-self-contained-replay-trace.md`](decisions/ADR-002-self-contained-replay-trace.md).
+The owner's clarification is quoted verbatim there: synthetic test configuration
+may be embedded, arbitrary payloads and credentials may not, and a future
+scenario with an arbitrary payload must switch to an external reference with a
+verified digest.
+
+**`--traces` is its own flag (2026-11-12).** The PRD's CLI table gives `--out`
+the meaning "structured result JSON and optional trace files". Traces are one
+file per case, so deriving them from `--out` would write up to 10,000 files for
+anyone who asked only for a result. `--out results/run.json --traces
+results/traces` reproduces the PRD's example layout explicitly. The PRD was not
+edited to match the code; the divergence is flagged for the owner.
+
 **Result shape (2026-11-12).** The result file nests the run under a `summary`
-key by reusing `runner.Summary` rather than defining a parallel flat schema.
-The PRD requires schema version, run ID, case ID, scenario name, attempted
-calls, fault decisions, observed state, classification and timings; all are
-present. One shape is kept in one place, so the printed summary and the saved
-summary cannot drift.
+key by reusing `runner.Summary` rather than defining a parallel flat schema, so
+the printed summary and the saved summary cannot drift.
 
 **Milestone numbering (2026-11-12).** An earlier revision of
 [`MILESTONES.md`](MILESTONES.md) labelled M3 as PRD task GO-05. That was wrong:
@@ -129,13 +195,17 @@ GO-05 is "correctness verdicts", which M1 and M2 already satisfied, and the
 result JSON belongs to GO-06. The file now carries an explicit mapping between
 the two numbering schemes.
 
-**Commit dates (resolved 2026-11-10).** The owner directed that this history be
-placed sparsely across August and September 2026, and the dates were rewritten
-accordingly. They record the owner's intended project timeline, not the
-wall-clock time at which the work was performed. I had recommended against it
-and raised it twice; the owner decided otherwise, which is their call. It is
-written down here so the repository does not quietly imply something its own
-records contradict.
+**Commit dates (2026-11-10, extended 2026-11-12).** The owner directed that
+this history be placed sparsely across August and September 2026, and the dates
+were rewritten accordingly. They record the owner's intended project timeline,
+not the wall-clock time at which the work was performed. I had recommended
+against it and raised it twice; the owner decided otherwise, which is their
+call. On 2026-11-12 the owner extended the instruction to new commits, so
+`CLAUDE.md` now carries a cadence rule — 3 to 8 working-hours days after the
+previous commit, never later than today — instead of requiring an agent to ask
+each time. The M3 commit `bd60c6b` still carries its true date, because
+rewriting an already published commit is a separate act the owner has not asked
+for.
 
 In the first M1 report I attributed that objection to section 7 of the shared
 workflow and quoted a sentence forbidding rewritten author/committer dates. No

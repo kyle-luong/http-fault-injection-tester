@@ -144,9 +144,9 @@ type Schedule struct {
 
 	mu        sync.Mutex
 	decisions []Decision
-	// byCase indexes the same decisions by case so that a run of thousands of
-	// cases does not scan the whole log once per case. It holds no decision the
-	// ordered log dropped, so the two never disagree.
+	// byCase indexes decisions by case, both so that a run of thousands of
+	// cases does not scan the whole log once per case, and so that a case's own
+	// history is complete even when the ordered log below has stopped growing.
 	byCase  map[string][]Decision
 	dropped int
 }
@@ -200,10 +200,17 @@ func (s *Schedule) Decide(caseID string, attempt int, stage Stage) (Decision, bo
 	}
 	if len(s.decisions) < maxRecordedDecisions {
 		s.decisions = append(s.decisions, d)
-		s.byCase[caseID] = append(s.byCase[caseID], d)
 	} else {
 		s.dropped++
 	}
+	// The per-case index is kept whole even once the ordered log is full. It is
+	// what a case's result and its replay trace record, and an empty decision
+	// list there does not read as "truncated", it reads as "no fault was
+	// injected" -- which would make a trace of a faulted case replay clean and
+	// report that it reproduced. Decide runs once per (case, attempt, stage),
+	// so this index is bounded by the run size times the stages a scenario can
+	// declare, not by how much traffic the proxy sees.
+	s.byCase[caseID] = append(s.byCase[caseID], d)
 	return d, true
 }
 
@@ -244,9 +251,10 @@ func (s *Schedule) DecisionsForCase(caseID string) []Decision {
 	return out
 }
 
-// DroppedDecisions reports decisions omitted from the log because the bound was
-// reached. A non-zero value means the log is incomplete, which replay must not
-// silently ignore.
+// DroppedDecisions reports decisions omitted from the whole-run ordered log
+// because its bound was reached. The per-case records returned by
+// DecisionsForCase are unaffected, so a non-zero value here means the run's
+// combined fault history is incomplete, not that any case's is.
 func (s *Schedule) DroppedDecisions() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

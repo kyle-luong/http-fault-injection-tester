@@ -10,7 +10,7 @@ IDs (`GO-0x`) and acceptance IDs (`GO-ACxx`, `GO-Txx`) come from
 | **M1 — Lost response, end to end** | GO-00, GO-01, GO-02, GO-03 | Repository scaffold; stateful fixture with a state oracle; loopback HTTP/1.1 fault proxy; all four MVP fault actions; strict scenario schema; single-case execution behind `faulttest run` | `./scripts/verify-full.sh` | **done** |
 | **M2 — Concurrent runner** | GO-04 | Bounded worker pool, `--runs` and `--parallel`, per-case IDs and deadlines, aggregate summary, cancellation of a whole run, measured throughput | `./scripts/verify-full.sh` plus 100 cases at parallelism 1 and 16 | **done** |
 | **M3 — Result reporting** | GO-06 (part 1) | `--out` structured JSON results, `report` subcommand, redaction rules asserted by test | `./scripts/verify-full.sh` plus a schema-stability test | **done** |
-| **M4 — Trace and replay** | GO-06 (part 2) | Per-case trace files, `faulttest replay --trace`, stable payload digests | `./scripts/verify-full.sh` plus a record-then-replay equivalence test | todo |
+| **M4 — Trace and replay** | GO-06 (part 2) | `--traces DIR` per-case trace files, `faulttest replay --trace`, stable payload digests, replay-versus-record comparison | `./scripts/verify-full.sh` plus `TestTraceReplayReproducesTheRecordedCase` | **done** |
 | **M5 — Hardening and benchmarks** | GO-07 | Resource-limit tests, direct-versus-proxy latency and throughput measurements, README demo walkthrough | `./scripts/verify-full.sh` plus `docs/benchmarks/` with measured numbers | todo |
 
 ## How these milestones map onto the PRD's task graph
@@ -57,18 +57,37 @@ layer over a working core rather than a part of it.
 | GO-AC03 | met | `TestLostResponseAppliesOnceOnSafeFixture`, `TestSameScenarioSeparatesSafeFromUnsafe` |
 | GO-AC04 | met | `TestRejectBeforeForwardLeavesBackendUntouched`, `TestRejectConnectionDoesNotContactUpstream` |
 | GO-AC05 | met | `TestDelayedResponseBeyondClientTimeout` |
-| GO-AC06 | partial | `TestDecideIsDeterministic` proves stable decisions; trace replay is M4 |
+| GO-AC06 | met | `TestDecideIsDeterministic` for stable decisions; `TestTraceReplayReproducesTheRecordedCase` for record-then-replay equivalence across four scenarios; `TestReplayDetectsATraceThatNoLongerDescribesItsRun` for the mismatch path; `TestReplayUsesTheRecordedDeadline` for the one configuration value a scenario does not hold; `TestPerCaseDecisionsSurviveTheLogBound` for the truncation that used to make a faulted case record an empty decision list |
 | GO-AC07 | met | `TestRunIsolatesEveryCase` at 1/8/32, `TestHundredCasesAtTwoParallelisms` at 100 cases, `TestRunHonoursTheConcurrencyBound` |
 | GO-AC08 | met | `TestCaseDeadlineIsRespected`, `TestRunCancellationStopsDispatchWithoutMisclassifying`, `TestRunCaseCancelledDuringAnAttemptHasNoVerdict`, `leaktest` in every server test |
-| GO-AC09 | met | `TestResultSchemaIsStable`, `TestParseRejectsUnusableResults`, `TestResultCarriesNoRequestPayloads`, `TestResultFileCarriesNoRequestPayloads`, `TestParseRejectsInvalidScenarios` |
+| GO-AC09 | met | `TestResultSchemaIsStable`, `TestParseRejectsUnusableResults`, `TestResultCarriesNoRequestPayloads`, `TestResultFileCarriesNoRequestPayloads`, `TestParseRejectsInvalidScenarios`, `TestParseRejectsUnusableTraces`, `TestTraceSchemaIsExactlyThis`, `TestTraceFilesCarryNoRequestPayloads` |
 | GO-AC10 | met | `TestHarnessFailureIsNotAnInvariantFailure`, `TestRunExitCodes`, `TestUsageErrorsExitTwo` |
-| GO-AC11 | met | `TestStartRejectsUnsafeUpstreams`, oversized-body and bad-header tests, `TestRunSpecBounds`, and the `--runs`/`--parallel` subcases of `TestUsageErrorsExitTwo` |
+| GO-AC11 | met | `TestStartRejectsUnsafeUpstreams`, oversized-body and bad-header tests, `TestRunSpecBounds`, `TestLoadRejectsAnOversizedTrace`, and the `--runs`/`--parallel` subcases of `TestUsageErrorsExitTwo` |
 | GO-AC12 | met | `go vet`, `go test`, `go test -race` all clean; no known flaky tests |
 | GO-AC13 | not started | M5 |
 | GO-AC14 | met | README demo commands, exercised by `cmd/faulttest` tests |
 
 `partial` means the part of the criterion that this milestone's scope covers is
-tested; the rest depends on work that is explicitly later.
+tested; the rest depends on work that is explicitly later. GO-AC13 is the only
+criterion still outstanding, and it is M5's whole content.
+
+The test IDs the PRD names for trace and replay are evidenced as follows:
+GO-T07 by `TestDecideIsDeterministic` and `TestRulesAreTheRecordedDecisions`,
+GO-T08 by `TestTraceReplayReproducesTheRecordedCase`, and GO-T14 by
+`TestRunWritesTracesAndReplayReproducesThem`, `TestReplayRejectsUnusableTraces`,
+`TestReplayReportsAMismatchAsInfrastructure`, `TestReplayUsageErrors`,
+`TestCaseIDTraceIsWrittenUnderThatID` and `TestReplayUsesTheDeadlineFromTheTrace`.
+
+One deviation from the PRD's CLI table, which is a contract document and so was
+not edited to match the code: the table gives `--out PATH` the meaning
+"structured result JSON and optional trace files", and its example shows
+`results/traces/case-0001.json` appearing from a run that passed only `--out`.
+This implementation puts traces behind their own `--traces DIR` flag instead, so
+`--out results/run.json --traces results/traces` produces the PRD's layout
+explicitly. The reason is that traces are one file per case: deriving them from
+`--out` would write up to 10,000 files for anyone who asked only for a result.
+The divergence is flagged for the owner rather than resolved by rewriting the
+PRD.
 
 ## Throughput
 

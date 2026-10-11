@@ -21,9 +21,9 @@ scenario JSON → validator → runner → test client → fault proxy → test 
 
 ## Status
 
-Milestones M1 to M3 of five are complete: the lost-response path works end to
-end, cases run concurrently under a bounded worker pool, and results are saved
-as structured JSON. See
+Milestones M1 to M4 of five are complete: the lost-response path works end to
+end, cases run concurrently under a bounded worker pool, results are saved as
+structured JSON, and any recorded case can be replayed from its trace. See
 [`docs/MILESTONES.md`](docs/MILESTONES.md) for what each later milestone adds,
 and [`docs/STATUS.md`](docs/STATUS.md) for current state.
 
@@ -134,6 +134,66 @@ logical operation and carries no caller data. An existing path is refused
 unless `--overwrite` is given, and an unwritable one is refused before the run
 starts rather than after it.
 
+## Recording and replaying one case
+
+`--traces DIR` writes one trace file per case. A trace is self-contained, so
+replay needs nothing else -- no scenario file, no result file:
+
+```console
+$ ./faulttest run --scenario scenarios/lost-response.json --runs 4 \
+      --out results/run.json --traces results/traces
+Scenario: lost-response | Fixture: unsafe-counter
+Cases: 4  Passed: 0  Failed: 4  Inconclusive: 0  Infrastructure: 0
+...
+Traces: results/traces
+Reproduce: faulttest replay --trace results/traces/case-0001.json
+Results: results/run.json
+
+$ ./faulttest replay --trace results/traces/case-0001.json
+Replaying case-0001 from run run-e397c0d17ea64342 recorded 2026-11-12T23:47:08Z
+Scenario: lost-response | Fixture: unsafe-counter
+Cases: 1  Passed: 0  Failed: 1  Inconclusive: 0  Infrastructure: 0
+Case case-0001: verdict=fail attempts=2 duration=2ms
+  attempt 1: no response (read: connection reset by peer)
+  attempt 2: status 200
+  injected: attempt=1 stage=after_upstream_response action=close_client_connection
+Violation: expected counter=1; observed counter=2 after 2 applied operation(s) [case-0001-key case-0001-key]
+Replay reproduced the recorded decisions, state and verdict (fail)
+```
+
+Replay injects the decisions the trace **recorded**, not the faults the scenario
+would match. Rebuilding the schedule from the scenario would mean both sides of
+the comparison came from the same place, so a trace that no longer describes its
+run could never be detected. After the case runs, the replay compares four
+things against the record: the injected decisions, the number of attempts, the
+observed fixture state, and the verdict.
+
+A trace carries the scenario's own configuration — fixture mode, retry policy,
+invariant, the synthetic numeric delta — the deadline the recorded run used, and,
+for the request, only its method, path and a `sha256` digest of the payload. It
+carries no request body and no request header. The digest is taken over the bytes
+the client builds, by the same function that builds them, so it cannot come to
+describe something else. The one request-side value present is the list of
+operation identifiers the oracle read back out of application state, which are
+the harness's own idempotency keys and carry no caller data.
+
+Digests over the embedded scenario and the request identity mean a partly edited
+trace is refused instead of replayed: without them, changing `invariant.expected`
+and the recorded verdict would make a real violation replay as a clean pass. They
+bind the file to itself and are not signatures — a trace is input, trusted as far
+as a scenario file is.
+
+What replay reproduces is the **injected fault decisions and the oracle's
+verdict** under the built-in fixture. It does not reproduce goroutine
+scheduling, port allocation or wall-clock timing, so a scenario whose verdict
+depends on an injected delay racing a client timeout can legitimately replay
+differently; the mismatch report names the axis that disagreed. A replay that
+does not reproduce its record exits 3, because that is this tool failing to
+reproduce itself rather than a finding about the application under test.
+
+[`docs/features/M4-trace-replay.md`](docs/features/M4-trace-replay.md) has the
+schema and the full validation rules.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -142,6 +202,8 @@ starts rather than after it.
 | 1 | an invariant failed — the application under test is wrong |
 | 2 | invalid input or configuration |
 | 3 | test infrastructure failure, or an outcome that could not be determined |
+
+A corrupted trace, and a replay that does not reproduce its record, are both 3.
 
 The 1/3 split is load-bearing. A harness that could not reach the oracle has not
 found an application bug, and the tool never reports one in that situation.
@@ -206,7 +268,9 @@ authorization design, which is out of MVP scope.
 Cleartext HTTP/1.1 only — hard connection control depends on it, and HTTPS
 interception, HTTP/2 and HTTP/3 are out of scope. One logical operation per
 case. One invariant type (`counter_equals`). Only the built-in fixture is
-supported as the application under test.
+supported as the application under test. Replay covers one case at a time, and
+`--seed` from the PRD's CLI table is unimplemented because the fault policies it
+would seed are randomized ones, which are explicitly later work.
 
 The only performance figures published are the harness throughput numbers in
 [`docs/benchmarks/M2-throughput.md`](docs/benchmarks/M2-throughput.md), which
@@ -224,6 +288,8 @@ internal/faults/      deterministic fault selection and decision log
 internal/client/      retry policy and attempt sequencing
 internal/verify/      state oracle and verdict classification
 internal/runner/      scenario → running infrastructure → case execution
+internal/report/      structured result file, written and read back
+internal/trace/       per-case replay record and the replay comparison
 internal/integration/ end-to-end tests, named after PRD acceptance IDs
 scenarios/            checked-in example scenarios, validated by tests
 docs/                 PRD, status, milestones, decisions, task contracts
