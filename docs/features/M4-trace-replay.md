@@ -182,7 +182,11 @@ and is refused on read past 1 MiB.
 Non-goals: replaying a whole run in one command, replaying against an external
 fixture, packet-level capture, and editing a trace to explore variations.
 
-Known rough edges, recorded rather than fixed: trace writing happens after the
-run, so an interrupted run still writes the traces of the cases that executed,
-which for thousands of cases is a noticeable tail; and a write that fails part
-way leaves the traces written so far, named in the error rather than cleaned up.
+Interrupts: the first stops the run, the second stops writing traces, and a
+third puts the default disposition back and re-raises so the process dies. An
+interrupted run still writes the traces of every case that executed, because
+they are evidence; a write stopped part way reports how far it got, and the
+traces it did write are complete. The `Reproduce:` line names a case the oracle
+judged to be a violation, never an inconclusive one -- after an interrupt every
+unfinished case is inconclusive, and replaying one reports a mismatch by
+construction.

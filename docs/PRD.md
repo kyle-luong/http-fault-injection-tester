@@ -39,7 +39,8 @@ This is **not** another generic reverse proxy, HTTP load generator, or chaos das
 Binary name: **`faulttest`**. Run/summary/replay without extra services to deploy.
 
 ```console
-$ faulttest run --scenario scenarios/lost-response.json --runs 500 --parallel 16 --out results/run.json
+$ faulttest run --scenario scenarios/lost-response.json --runs 500 --parallel 16 \
+      --out results/run.json --traces results/traces
 Scenario: lost-response | Fixture: unsafe-counter
 Cases: 500  Passed: 0  Failed: 500  Infrastructure errors: 0
 Violation: expected counter=1; observed counter=2 after retry
@@ -59,7 +60,8 @@ Example *illustrative*, not measured output. Test exit codes: `0` if all case in
 | `--runs N` | Independent test cases, each with its own ID and isolated state | Default 1; max 10,000 initially |
 | `--parallel N` | Maximum simultaneous cases, not unbounded goroutines | Default 1; max 64 for built-in fixture initially |
 | `--timeout DURATION` | Overall per-case deadline | Default 5s; explicit upper bound 60s |
-| `--out PATH` | Structured result JSON and optional trace files | Optional; refuse overwrite unless `--overwrite` |
+| `--out PATH` | Structured result JSON | Optional; refuse overwrite unless `--overwrite`; may not point inside `--traces` |
+| `--traces DIR` | One replayable trace file per executed case | Optional, and a separate flag rather than something `--out` implies: traces are one file per case, so deriving them from `--out` would write up to 10,000 files for anyone who asked only for a result. `--out results/run.json --traces results/traces` produces the layout shown above. Refuse overwrite unless `--overwrite` |
 | `--seed UINT64` | Derive stable case-specific seeds when randomized fault policies are added | Default explicit stable seed; not a claim of OS scheduling determinism |
 | `replay --trace PATH` | Re-run recorded test using same injected fault decisions and request data | Required trace |
 | `report PATH` | Summarize saved result without re-execution | Optional convenience, after `run` exists |
@@ -138,7 +140,8 @@ internal/proxy/proxy.go         HTTP/1.1 forwarding and fault stages
 internal/faults/scheduler.go    rule matcher / injection decision log
 internal/fixture/server.go      unsafe/safe fixture and state oracle
 internal/verify/oracle.go       expected state / invariants
-internal/report/report.go       structured result and replay trace
+internal/report/report.go       structured result file
+internal/trace/trace.go         per-case replay record and comparison
 internal/integration/           end-to-end tests
 scenarios/                      checked-in safe example scenarios
 scripts/verify.sh, verify-full.sh
@@ -216,6 +219,22 @@ Avoid interface proliferation. Introduce an interface only where two real implem
 ## 5. Security boundaries
 
 This tool can intentionally damage request semantics. Default `run` must start locally controlled fixture servers and only bind/connect to loopback interfaces. It does not target public networks in MVP. No credentials, payment APIs, external services, or live production endpoints are required. Don't store private headers or request bodies in traces. Set explicit total test timeouts. Limit concurrent sockets, response-body sizes, and output logs to avoid disk/resource exhaustion. If external local service support is added, require a flag specifying the test oracle and a warning that it can produce duplicate side effects.
+
+**Trace digests are consistency checks, not security.** A trace embeds its
+scenario and carries a digest over it, plus a digest of the request identity.
+Those detect an inconsistent or partly edited file and nothing more: they
+provide **no authentication and no tamper resistance**, and a trace rewritten
+wholesale with its digests recomputed is indistinguishable from a genuine one.
+A trace is input, trusted exactly as far as a scenario file is. Replay
+establishes that the embedded configuration reaches the recorded outcome, never
+that the record is genuine.
+
+**Duplicate JSON keys are accepted** by scenario, result and trace parsing, with
+the last value winning, so a crafted file can read one way to a human and
+execute another. "Strictly parsed" in this document means unknown keys and
+trailing content. Within the supported model -- local synthetic fixtures, files
+the operator wrote -- this is a documented limitation rather than a defect, and
+it is not worth a hand-written parser.
 
 **No automatic authorization to test third-party APIs.** A future `--allow-remote` must require user approval and documented safety restrictions; it is outside MVP. The CLI must refuse non-loopback URLs by default rather than merely warn.
 

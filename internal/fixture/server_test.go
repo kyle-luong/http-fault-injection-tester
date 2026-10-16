@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -374,5 +376,48 @@ func TestResetClearsExistingState(t *testing.T) {
 	}
 	if state.Counter != 0 || len(state.Operations) != 0 {
 		t.Errorf("state after reset = %+v, want a zeroed case", state)
+	}
+}
+
+// TestFetchStateGivesUpOnASlowOracle covers the GO-T13 "slow oracle" boundary
+// directly: the state endpoint, not the proxy, is the slow party.
+//
+// The oracle decides every verdict, so a read that never returns would hang a
+// case forever and a read that returns late could describe state from before
+// the case finished. The read must therefore be bounded by its context, and the
+// failure must be an error the caller can classify -- the runner turns it into
+// harness_error, never into a finding about the application.
+func TestFetchStateGivesUpOnASlowOracle(t *testing.T) {
+	leaktest.Check(t)
+
+	release := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(func() {
+		close(release)
+		slow.Close()
+	})
+
+	hc := &http.Client{}
+	defer hc.CloseIdleConnections()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	state, err := FetchState(ctx, hc, slow.URL, "case-0001")
+	elapsed := time.Since(started)
+
+	if err == nil {
+		t.Fatalf("FetchState returned state %+v from an oracle that never answered", state)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %v, want it to carry the deadline so the caller can classify it", err)
+	}
+	// The budget, not the oracle, must decide when to stop waiting.
+	if elapsed > time.Second {
+		t.Errorf("FetchState waited %s past a 50ms budget", elapsed)
 	}
 }

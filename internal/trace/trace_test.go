@@ -1,6 +1,7 @@
 package trace
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -97,7 +98,7 @@ func TestWriteRunAndLoadRoundTrip(t *testing.T) {
 	recorded := recordedOutcome()
 	recordedAt := time.Date(2026, 10, 15, 18, 4, 11, 0, time.UTC)
 
-	if err := WriteRun(dir, false, "run-test", recordedAt, 3*time.Second, sc,
+	if err := WriteRun(context.Background(), dir, false, "run-test", recordedAt, 3*time.Second, sc,
 		[]runner.Outcome{recorded}); err != nil {
 		t.Fatalf("WriteRun: %v", err)
 	}
@@ -145,13 +146,13 @@ func TestWriteRunRefusesToOverwriteATrace(t *testing.T) {
 	now := time.Now().UTC()
 
 	timeout := runner.DefaultCaseTimeout
-	if err := WriteRun(dir, false, "run-a", now, timeout, sc, out); err != nil {
+	if err := WriteRun(context.Background(), dir, false, "run-a", now, timeout, sc, out); err != nil {
 		t.Fatalf("first WriteRun: %v", err)
 	}
-	if err := WriteRun(dir, false, "run-b", now, timeout, sc, out); err == nil {
+	if err := WriteRun(context.Background(), dir, false, "run-b", now, timeout, sc, out); err == nil {
 		t.Error("WriteRun replaced an existing trace without --overwrite")
 	}
-	if err := WriteRun(dir, true, "run-b", now, timeout, sc, out); err != nil {
+	if err := WriteRun(context.Background(), dir, true, "run-b", now, timeout, sc, out); err != nil {
 		t.Fatalf("WriteRun with overwrite: %v", err)
 	}
 	tr, err := Load(Path(dir, "case-0001"))
@@ -171,7 +172,7 @@ func TestTraceFileNamesStayInsideTheDirectory(t *testing.T) {
 	o := recordedOutcome()
 	o.CaseID = filepath.Join("..", "escaped")
 
-	if err := WriteRun(dir, false, "run-test", time.Now().UTC(), runner.DefaultCaseTimeout, sc,
+	if err := WriteRun(context.Background(), dir, false, "run-test", time.Now().UTC(), runner.DefaultCaseTimeout, sc,
 		[]runner.Outcome{o}); err == nil {
 		t.Error("WriteRun accepted a case ID that leaves the trace directory")
 	}
@@ -213,6 +214,27 @@ func TestCheckWritableRefusesBeforeARun(t *testing.T) {
 	// warn that the directory holds traces from another run.
 	if existing, err := CheckWritable(dir, true, ids); err != nil || existing != 1 {
 		t.Errorf("CheckWritable with overwrite = (%d, %v), want (1, nil)", existing, err)
+	}
+}
+
+// TestCheckWritableIgnoresInterruptedLitter: a run killed outright leaves the
+// temporary file its atomic write was using. That is this package's own litter,
+// and a directory holding one must not be refused as though it held a trace --
+// a hard kill would otherwise poison the next run.
+func TestCheckWritableIgnoresInterruptedLitter(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{".tmp-12345.json", ".probe-678"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o600); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	existing, err := CheckWritable(dir, false, []string{"case-0001"})
+	if err != nil {
+		t.Errorf("CheckWritable refused a directory holding only litter: %v", err)
+	}
+	if existing != 0 {
+		t.Errorf("CheckWritable counted %d existing trace(s), want 0", existing)
 	}
 }
 
@@ -507,4 +529,40 @@ func allKeys(v any) map[string]bool {
 		}
 	}
 	return keys
+}
+
+// TestWriteRunStopsWhenCancelled covers the interrupted output phase: a
+// 10,000-case run has 10,000 files to write, and an operator who interrupts
+// again must not have to wait for the rest.
+func TestWriteRunStopsWhenCancelled(t *testing.T) {
+	dir := t.TempDir()
+	sc := loadScenario(t, "lost-response.json")
+
+	outcomes := make([]runner.Outcome, 0, 5)
+	for i := range 5 {
+		o := recordedOutcome()
+		o.CaseID = runner.CaseID(i + 1)
+		o.Verification.Observed.CaseID = o.CaseID
+		outcomes = append(outcomes, o)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := WriteRun(ctx, dir, false, "run-test", time.Now().UTC(),
+		runner.DefaultCaseTimeout, sc, outcomes)
+	if err == nil {
+		t.Fatal("WriteRun ignored a cancelled context")
+	}
+	if !strings.Contains(err.Error(), "of 5 trace(s)") {
+		t.Errorf("error does not say how far it got: %v", err)
+	}
+
+	written, globErr := filepath.Glob(filepath.Join(dir, "*.json"))
+	if globErr != nil {
+		t.Fatalf("glob: %v", globErr)
+	}
+	if len(written) != 0 {
+		t.Errorf("wrote %d trace(s) under a cancelled context", len(written))
+	}
 }

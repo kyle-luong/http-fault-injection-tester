@@ -26,6 +26,7 @@ package trace
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -159,7 +160,14 @@ func Path(dir, caseID string) string { return filepath.Join(dir, caseID+".json")
 
 // WriteRun writes one trace per outcome into dir, with the same atomicity and
 // the same refusal to overwrite that the result file gets.
+//
+// It stops when ctx is done, which is what makes an interrupted run's output
+// phase interruptible: a 10,000-case run has 10,000 files to write, and an
+// operator who pressed Ctrl-C twice should not have to watch the second half
+// land. The error says how many were written, because a half-filled directory
+// is worth knowing about.
 func WriteRun(
+	ctx context.Context,
 	dir string,
 	overwrite bool,
 	runID string,
@@ -169,6 +177,9 @@ func WriteRun(
 	outcomes []runner.Outcome,
 ) error {
 	for i, o := range outcomes {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("stopped after %d of %d trace(s): %w", i, len(outcomes), err)
+		}
 		tr, err := New(runID, recordedAt, caseTimeout, sc, o)
 		if err != nil {
 			return err
@@ -203,9 +214,19 @@ func CheckWritable(dir string, overwrite bool, caseIDs []string) (int, error) {
 		return 0, fmt.Errorf("create trace directory %s: %w", dir, err)
 	}
 
-	existing, err := filepath.Glob(filepath.Join(dir, "*.json"))
+	matches, err := filepath.Glob(filepath.Join(dir, "*.json"))
 	if err != nil {
 		return 0, fmt.Errorf("inspect trace directory %s: %w", dir, err)
+	}
+	// A run killed outright cannot run its own cleanup, so the directory may
+	// hold a half-written .tmp-*.json. Those are this package's litter, not
+	// traces, and refusing the directory because of one would make a hard kill
+	// poison the next run.
+	existing := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if !strings.HasPrefix(filepath.Base(m), ".") {
+			existing = append(existing, m)
+		}
 	}
 	if !overwrite && len(existing) > 0 {
 		return len(existing), fmt.Errorf("%s already holds %d trace file(s), starting with %s; "+

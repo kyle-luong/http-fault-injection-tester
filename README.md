@@ -21,9 +21,11 @@ scenario JSON → validator → runner → test client → fault proxy → test 
 
 ## Status
 
-Milestones M1 to M4 of five are complete: the lost-response path works end to
-end, cases run concurrently under a bounded worker pool, results are saved as
-structured JSON, and any recorded case can be replayed from its trace. See
+All five milestones are complete: the lost-response path works end to end,
+cases run concurrently under a bounded worker pool, results are saved as
+structured JSON, any recorded case can be replayed from its trace, and the
+proxy's cost is measured rather than asserted. Every PRD acceptance criterion
+(GO-AC01 to GO-AC14) is evidenced by a test or a documented benchmark. See
 [`docs/MILESTONES.md`](docs/MILESTONES.md) for what each later milestone adds,
 and [`docs/STATUS.md`](docs/STATUS.md) for current state.
 
@@ -136,8 +138,10 @@ starts rather than after it.
 
 ## Recording and replaying one case
 
-`--traces DIR` writes one trace file per case. A trace is self-contained, so
-replay needs nothing else -- no scenario file, no result file:
+`--traces DIR` writes one trace file per case; it is a separate flag from
+`--out` because traces are one file per case, and a 10,000-case run should not
+produce 10,000 files for someone who asked only for a result. A trace is
+self-contained, so replay needs nothing else — no scenario file, no result file:
 
 ```console
 $ ./faulttest run --scenario scenarios/lost-response.json --runs 4 \
@@ -179,9 +183,13 @@ the harness's own idempotency keys and carry no caller data.
 
 Digests over the embedded scenario and the request identity mean a partly edited
 trace is refused instead of replayed: without them, changing `invariant.expected`
-and the recorded verdict would make a real violation replay as a clean pass. They
-bind the file to itself and are not signatures — a trace is input, trusted as far
-as a scenario file is.
+and the recorded verdict would make a real violation replay as a clean pass.
+
+They are **consistency checks, not security**: they provide no authentication and
+no tamper resistance, and a trace rewritten wholesale with its digests recomputed
+is indistinguishable from a genuine one. A trace is input, trusted exactly as far
+as a scenario file is. Replay establishes that the embedded configuration reaches
+the recorded outcome, not that the record is genuine.
 
 What replay reproduces is the **injected fault decisions and the oracle's
 verdict** under the built-in fixture. It does not reproduce goroutine
@@ -272,10 +280,22 @@ supported as the application under test. Replay covers one case at a time, and
 `--seed` from the PRD's CLI table is unimplemented because the fault policies it
 would seed are randomized ones, which are explicitly later work.
 
-The only performance figures published are the harness throughput numbers in
-[`docs/benchmarks/M2-throughput.md`](docs/benchmarks/M2-throughput.md), which
-were measured on a loaded machine and say so. The proxy-versus-direct
-comparison is M5. No figure appears anywhere here that was not measured.
+Performance figures live in [`docs/benchmarks/`](docs/benchmarks/), with the raw
+per-trial output beside them. The proxy's measured cost
+([`M5-proxy-overhead.md`](docs/benchmarks/M5-proxy-overhead.md)) is that it
+**roughly halves throughput** — the direct-to-proxy ratio held between 1.89 and
+2.07 at every parallelism level across sessions whose host load differed by
+2.4× — and that allocation per operation roughly doubles. Absolute latency
+figures moved by half between those sessions, so the document publishes the
+ratio and not a microsecond number. No figure appears anywhere here that was not
+measured, and nothing in this repository was optimised for one.
+
+**A known defect to be aware of:** a case can be scored before an attempt's
+write lands, if the client abandons that attempt faster than the proxy accepts
+it — reachable with a per-attempt `timeout_ms` shorter than a loopback round
+trip. Measured at roughly one case in three hundred under CPU load, zero on a
+quiet host. Full measurement and the proposed fix:
+[`docs/features/M5-hardening.md`](docs/features/M5-hardening.md).
 
 ## Layout
 

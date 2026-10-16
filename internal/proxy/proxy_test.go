@@ -715,3 +715,94 @@ func TestUpstreamRequestIsNotReplayedAfterAReset(t *testing.T) {
 			resp.StatusCode, http.StatusBadGateway)
 	}
 }
+
+// TestUpstreamErrorStatusIsForwardedUnchanged covers the GO-T13 "server 500"
+// boundary. The proxy is not an error handler: an application that answers 500
+// must reach the client as 500, so the oracle -- not the proxy -- decides what
+// it means. A proxy that turned it into 502 would be indistinguishable from the
+// upstream being unreachable.
+func TestUpstreamErrorStatusIsForwardedUnchanged(t *testing.T) {
+	leaktest.Check(t)
+	up := startUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"boom"}`)
+	})
+	p := startProxy(t, up.server.URL, nil)
+	hc := proxyClient(t)
+
+	resp, body, err := send(t, hc, p.BaseURL(), "case-1", 1, `{"case_id":"case-1"}`)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500 forwarded verbatim", resp.StatusCode)
+	}
+	if string(body) != `{"error":"boom"}` {
+		t.Errorf("body = %q, want the upstream body verbatim", body)
+	}
+	if stats := p.Stats(); stats.Forwarded != 1 || stats.FaultsInjected != 0 {
+		t.Errorf("stats = %+v, want 1 forwarded and no fault", stats)
+	}
+}
+
+// TestQuiescenceCoversAnUpstreamCallTheClientAbandoned pins the narrower
+// guarantee the settlement window can actually make: for every request this
+// proxy has begun handling, quiescence means the upstream has finished with it.
+//
+// The upstream call used to inherit the client's request context, so a client
+// that gave up mid-round-trip cancelled it: the handler returned, the in-flight
+// count dropped, and quiescence said yes while the upstream was still applying
+// the operation. A state read then described a moment before that write landed.
+func TestQuiescenceCoversAnUpstreamCallTheClientAbandoned(t *testing.T) {
+	leaktest.Check(t)
+
+	var applied atomic.Int64
+	started := make(chan struct{}, 1)
+	up := startUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		// Long enough that the client below has certainly given up, and that a
+		// quiescence check cannot pass by racing it.
+		time.Sleep(300 * time.Millisecond)
+		applied.Add(1)
+		w.WriteHeader(http.StatusOK)
+	})
+	p := startProxy(t, up.server.URL, nil)
+
+	hc := proxyClient(t)
+	abandonCtx, abandon := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer abandon()
+
+	req, err := http.NewRequestWithContext(abandonCtx, http.MethodPost,
+		p.BaseURL()+"/operation", strings.NewReader(`{"case_id":"case-1"}`))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set(HeaderCaseID, "case-1")
+	req.Header.Set(HeaderAttempt, "1")
+	if resp, err := hc.Do(req); err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("the client was supposed to give up before the upstream answered")
+	}
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the upstream never received the request")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := p.WaitForQuiescence(ctx, "case-1"); err != nil {
+		t.Fatalf("WaitForQuiescence: %v", err)
+	}
+
+	// The whole point: once quiescence returns, the operation has landed. If it
+	// has not, every verdict read after this moment describes stale state.
+	if got := applied.Load(); got != 1 {
+		t.Errorf("upstream applied %d operation(s) when quiescence returned, want 1; "+
+			"the abandoned call was still in progress", got)
+	}
+}

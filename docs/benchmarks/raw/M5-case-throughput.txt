@@ -1,0 +1,15 @@
+host:    Darwin arm64, 10 logical CPUs
+go:      go1.27.4
+commit:  c04ebaf (dirty)
+method:  500 cases per trial, 5 trials, median reported
+load:    13.95 14.89 11.87 (1/5/15 min) before the run
+
+scenario               parallelism        min     median        max
+no-fault-baseline      1               1013.0     1664.5     1774.8
+no-fault-baseline      8               4176.8     4702.5     4783.7
+no-fault-baseline      32              3273.9     3728.3     4231.0
+lost-response          1                746.8      794.2      803.6
+lost-response          8               2075.7     2104.9     2190.5
+lost-response          32              1969.6     2164.3     2209.1
+
+load:    14.13 14.90 11.91 (1/5/15 min) after the run

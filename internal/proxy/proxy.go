@@ -95,6 +95,9 @@ type Proxy struct {
 	transport *http.Transport
 	srv       *http.Server
 	baseURL   string
+	// upstreamTimeout bounds one upstream call on its own, independently of
+	// whatever the client does. See forward.
+	upstreamTimeout time.Duration
 
 	inflightMu sync.Mutex
 	inflight   map[string]int
@@ -126,10 +129,11 @@ func Start(opts Options) (*Proxy, error) {
 	}
 
 	p := &Proxy{
-		upstream: upstream,
-		schedule: opts.Schedule,
-		inflight: make(map[string]int),
-		baseURL:  "http://" + ln.Addr().String(),
+		upstream:        upstream,
+		schedule:        opts.Schedule,
+		inflight:        make(map[string]int),
+		baseURL:         "http://" + ln.Addr().String(),
+		upstreamTimeout: timeout,
 		transport: &http.Transport{
 			// No environment proxy: this tool must never route test traffic
 			// through anything the user did not configure here.
@@ -194,12 +198,21 @@ func (p *Proxy) Close() error {
 	return nil
 }
 
-// WaitForQuiescence blocks until no upstream call for caseID is in flight.
+// WaitForQuiescence blocks until the proxy is handling nothing for caseID.
 //
-// This is the settlement boundary the oracle needs: once the proxy holds a
-// complete upstream response, the upstream has already applied (or refused) the
-// operation, so reading state afterwards cannot race the backend. A timeout
-// here means the outcome is unknown, which the caller must report as
+// This is the settlement boundary the oracle needs, and it is worth being
+// exact about its reach. A request this proxy is handling may yet reach the
+// upstream and change state -- including one stalled in an injected delay
+// before the upstream has been contacted at all, and one whose client has
+// walked away mid-round-trip -- so the window is the whole handler and the
+// upstream call runs on its own deadline. Once this returns, every request the
+// proxy accepted for caseID has finished.
+//
+// It cannot speak for a request the proxy has not accepted yet. A client that
+// abandons an attempt faster than the server reads it leaves work the oracle
+// cannot wait for; see the note in docs/STATUS.md.
+//
+// A timeout here means the outcome is unknown, which the caller must report as
 // inconclusive rather than as a duplicated side effect.
 func (p *Proxy) WaitForQuiescence(ctx context.Context, caseID string) error {
 	ticker := time.NewTicker(quiescencePollInterval)
@@ -240,6 +253,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeProxyError(w, http.StatusBadRequest, "missing or invalid "+HeaderAttempt+" header")
 		return
 	}
+
+	// The settlement window is the whole handler, not just the upstream call.
+	//
+	// It used to bracket only the round trip, which left a hole: an injected
+	// delay at before_forward stalls here with nothing in flight, so a client
+	// that had already given up let the oracle read state while this handler
+	// was still going to apply the operation. The counter read as 0, the case
+	// was scored, and the write landed afterwards.
+	//
+	// What this gives is a guarantee about every request the proxy has begun
+	// handling, and nothing more. A request the client has already sent but
+	// this server has not yet accepted is invisible here, and no accounting
+	// inside this process can see it. That gap is real and produces verdicts
+	// about stale state under a per-attempt timeout shorter than a loopback
+	// round trip; it is recorded in docs/STATUS.md, with the measurement.
+	p.enterInflight(caseID)
+	defer p.exitInflight(caseID)
 
 	body, err := readBounded(http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes), MaxRequestBodyBytes)
 	if err != nil {
@@ -299,17 +329,31 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // forward sends one attempt upstream and reads the complete response. The
-// in-flight accounting brackets exactly the window during which the upstream
-// may still be mutating state.
+// caller holds the in-flight accounting, which brackets the whole handler.
 func (p *Proxy) forward(r *http.Request, body []byte, caseID string) (*http.Response, []byte, error) {
-	p.enterInflight(caseID)
-	defer p.exitInflight(caseID)
-
 	target := *p.upstream
 	target.Path = r.URL.Path
 	target.RawQuery = r.URL.RawQuery
 
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), bytes.NewReader(body))
+	// An upstream call is not abandoned because the client walked away.
+	//
+	// It used to inherit the client request's context. A client that gave up
+	// mid-round-trip therefore cancelled the call: the handler returned, the
+	// in-flight count dropped, and settlement declared the case quiescent --
+	// while the fixture was still applying the operation. The oracle then read
+	// state from before that write landed, and on the unsafe fixture the write
+	// that lands late is the duplicate this tool exists to find. It was
+	// reported as a clean pass.
+	//
+	// So the call runs to completion on its own deadline. The request has
+	// already been sent; whether it committed is the only question that
+	// matters, and only the upstream can answer it. The deadline is what keeps
+	// this bounded.
+	upstreamCtx, cancelUpstream := context.WithTimeout(
+		context.WithoutCancel(r.Context()), p.upstreamTimeout)
+	defer cancelUpstream()
+
+	req, err := http.NewRequestWithContext(upstreamCtx, r.Method, target.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, fmt.Errorf("build upstream request: %w", err)
 	}

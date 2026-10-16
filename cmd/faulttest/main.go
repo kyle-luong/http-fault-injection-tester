@@ -210,8 +210,30 @@ func runScenario(args []string, stdout, stderr io.Writer) int {
 		}
 	}()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	// One handler for the whole process, and successive interrupts mean
+	// successive things. Installing a second handler later would leave a gap
+	// in which a signal is fatal, and would absorb an interrupt that arrived
+	// while the run was winding down.
+	signals := make(chan os.Signal, 3)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+
+	ctx, stopRun := context.WithCancel(context.Background())
+	defer stopRun()
+	outCtx, stopOutput := context.WithCancel(context.Background())
+	defer stopOutput()
+
+	dispatcherDone := make(chan struct{})
+	defer close(dispatcherDone)
+	go interruptPhases(signals, dispatcherDone, stopRun, stopOutput, func() {
+		// The operator is insisting. Put the default disposition back and
+		// re-raise, so the process dies the way the shell expects rather than
+		// absorbing signals forever.
+		signal.Stop(signals)
+		if self, err := os.FindProcess(os.Getpid()); err == nil {
+			_ = self.Signal(os.Interrupt)
+		}
+	})
 
 	runID, startedAt := report.NewRunID(), time.Now().UTC()
 
@@ -234,8 +256,11 @@ func runScenario(args []string, stdout, stderr io.Writer) int {
 	}
 
 	code := exitCodeFor(summary)
+
+	// Writing a trace per case is thousands of files for a large run, so the
+	// output phase answers to the second interrupt.
 	if *tracesDir != "" {
-		if err := trace.WriteRun(*tracesDir, *overwrite, runID, startedAt,
+		if err := trace.WriteRun(outCtx, *tracesDir, *overwrite, runID, startedAt,
 			env.CaseTimeout(), sc, summary.Outcomes); err != nil {
 			fmt.Fprintf(stderr, "could not write traces: %v\n", err)
 			// Traces that were asked for and never arrived leave the run
@@ -251,7 +276,7 @@ func runScenario(args []string, stdout, stderr io.Writer) int {
 				fmt.Fprintf(stderr, "warning: %s already held %d trace file(s) before this run; "+
 					"those not replaced describe a different run\n", *tracesDir, foreignTraces)
 			}
-			if o, ok := firstCaseNeedingExplanation(summary); ok {
+			if o, ok := firstViolation(summary); ok {
 				fmt.Fprintf(stdout, "Reproduce: faulttest replay --trace %s\n", trace.Path(*tracesDir, o.CaseID))
 			}
 		}
@@ -271,15 +296,48 @@ func runScenario(args []string, stdout, stderr io.Writer) int {
 	return code
 }
 
-// firstCaseNeedingExplanation picks the case worth reproducing: the first that
-// did not pass, since a pass needs no reproduction.
-func firstCaseNeedingExplanation(s runner.Summary) (runner.Outcome, bool) {
+// firstViolation picks the case worth reproducing: the first the oracle judged
+// to be a violation.
+//
+// Deliberately not "the first that did not pass". An inconclusive case has no
+// outcome to reproduce -- after an interrupt every unfinished case is
+// inconclusive, and nominating one sends the operator to a replay that reports
+// a mismatch by construction, which reads as the tool failing to reproduce
+// itself.
+func firstViolation(s runner.Summary) (runner.Outcome, bool) {
 	for _, o := range s.Outcomes {
-		if o.Verdict() != verify.VerdictPass {
+		if o.Verdict() == verify.VerdictFail {
 			return o, true
 		}
 	}
 	return runner.Outcome{}, false
+}
+
+// interruptPhases turns successive interrupts into the three things an operator
+// means by them: stop starting work, stop writing output, give up on the
+// process. It is kept apart from the signal plumbing so it can be tested
+// without sending real signals.
+func interruptPhases(signals <-chan os.Signal, done <-chan struct{}, stopRun, stopOutput, giveUp func()) {
+	for count := 0; ; {
+		select {
+		case <-done:
+			return
+		case _, ok := <-signals:
+			if !ok {
+				return
+			}
+		}
+		count++
+		switch count {
+		case 1:
+			stopRun()
+		case 2:
+			stopOutput()
+		default:
+			giveUp()
+			return
+		}
+	}
 }
 
 // replayTrace re-runs one recorded case from its trace alone and reports

@@ -427,3 +427,53 @@ func TestExecuteSendsOneWireRequestPerAttempt(t *testing.T) {
 		t.Error("Execute reported success for an attempt whose response never arrived")
 	}
 }
+
+// TestExecuteTreatsAnUndecodableResponseAsNoResponse covers the GO-T13
+// boundary cases where a response arrives but says nothing usable: an empty
+// 200 body, and a 200 body that is not the fixture's contract.
+//
+// These must look like "no response", not like success. A client that counted
+// an empty 200 as a completed operation would let the oracle be bypassed by a
+// malformed reply.
+func TestExecuteTreatsAnUndecodableResponseAsNoResponse(t *testing.T) {
+	cases := map[string]string{
+		"empty body":     "",
+		"not json":       "nope",
+		"foreign object": `{"unexpected":1}`,
+	}
+
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, body)
+			}))
+			defer server.Close()
+
+			hc := NewHTTPClient()
+			defer CloseIdleConnections(hc)
+
+			result, err := Execute(context.Background(), hc, server.URL, "case-1", basePolicy())
+			if err != nil {
+				t.Fatalf("Execute returned a harness error for an application response: %v", err)
+			}
+			if len(result.Attempts) != 1 {
+				t.Fatalf("attempts = %d, want 1", len(result.Attempts))
+			}
+			attempt := result.Attempts[0]
+			if attempt.TransportError == "" {
+				t.Error("an undecodable response was not recorded as a failed attempt")
+			}
+			if attempt.Response != nil {
+				t.Errorf("Response = %+v, want nothing decoded", attempt.Response)
+			}
+			if result.Succeeded() {
+				t.Error("Succeeded() is true for a response that could not be read")
+			}
+			if !attempt.Failed() {
+				t.Error("Failed() is false for a response that could not be read")
+			}
+		})
+	}
+}

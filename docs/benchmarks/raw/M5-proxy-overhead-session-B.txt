@@ -1,0 +1,69 @@
+host:    Darwin arm64, 10 logical CPUs, Apple M4
+go:      go1.27.4
+commit:  c04ebaf (uncommitted changes)
+method:  2000 operations per trial, 5 trials, each trial one
+         invocation measuring direct then proxy, non-race build
+load:    6.24 5.11 4.82 (1/5/15 min) before the run
+
+raw results, every trial (GO-T15 asks for these, not just a summary):
+trial 1 BenchmarkOperation/direct/parallel=1-10         	    2000	     99959 ns/op	         8.000 goroutines	        99.00 mean-us	     10004 ops/sec	        83.00 p50-us	       161.0 p95-us	       199.0 wall-ms	    8520 B/op	     106 allocs/op
+trial 1 BenchmarkOperation/proxy/parallel=1-10          	    2000	    201474 ns/op	        14.00 goroutines	       201.0 mean-us	      4963 ops/sec	       171.0 p50-us	       329.0 p95-us	       402.0 wall-ms	   18383 B/op	     210 allocs/op
+trial 1 BenchmarkOperation/direct/parallel=8-10         	    2000	     30015 ns/op	        35.00 goroutines	       236.0 mean-us	     33317 ops/sec	       218.0 p50-us	       352.0 p95-us	        60.00 wall-ms	    8708 B/op	     106 allocs/op
+trial 1 BenchmarkOperation/proxy/parallel=8-10          	    2000	     60376 ns/op	        59.00 goroutines	       480.0 mean-us	     16563 ops/sec	       443.0 p50-us	       712.0 p95-us	       120.0 wall-ms	   19926 B/op	     212 allocs/op
+trial 1 BenchmarkOperation/direct/parallel=32-10        	    2000	     32100 ns/op	       110.0 goroutines	      1012 mean-us	     31153 ops/sec	       886.0 p50-us	      1545 p95-us	        64.00 wall-ms	    9370 B/op	     107 allocs/op
+trial 1 BenchmarkOperation/proxy/parallel=32-10         	    2000	     64287 ns/op	       203.0 goroutines	      2027 mean-us	     15555 ops/sec	      1859 p50-us	      2784 p95-us	       128.0 wall-ms	   19250 B/op	     212 allocs/op
+trial 2 BenchmarkOperation/direct/parallel=1-10         	    2000	    103651 ns/op	         8.000 goroutines	       103.0 mean-us	      9648 ops/sec	        83.00 p50-us	       169.0 p95-us	       207.0 wall-ms	    8595 B/op	     106 allocs/op
+trial 2 BenchmarkOperation/proxy/parallel=1-10          	    2000	    221988 ns/op	        14.00 goroutines	       221.0 mean-us	      4505 ops/sec	       183.0 p50-us	       390.0 p95-us	       443.0 wall-ms	   18239 B/op	     210 allocs/op
+trial 2 BenchmarkOperation/direct/parallel=8-10         	    2000	     31541 ns/op	        32.00 goroutines	       250.0 mean-us	     31704 ops/sec	       227.0 p50-us	       411.0 p95-us	        63.00 wall-ms	    9130 B/op	     106 allocs/op
+trial 2 BenchmarkOperation/proxy/parallel=8-10          	    2000	     64023 ns/op	        59.00 goroutines	       507.0 mean-us	     15619 ops/sec	       461.0 p50-us	       809.0 p95-us	       128.0 wall-ms	   19185 B/op	     211 allocs/op
+trial 2 BenchmarkOperation/direct/parallel=32-10        	    2000	     32511 ns/op	       110.0 goroutines	      1014 mean-us	     30759 ops/sec	       913.0 p50-us	      1453 p95-us	        65.00 wall-ms	    9022 B/op	     107 allocs/op
+trial 2 BenchmarkOperation/proxy/parallel=32-10         	    2000	     75225 ns/op	       203.0 goroutines	      2371 mean-us	     13293 ops/sec	      2265 p50-us	      3772 p95-us	       150.0 wall-ms	   19085 B/op	     212 allocs/op
+trial 3 BenchmarkOperation/direct/parallel=1-10         	    2000	     95908 ns/op	         8.000 goroutines	        95.00 mean-us	     10427 ops/sec	        80.00 p50-us	       156.0 p95-us	       191.0 wall-ms	    8600 B/op	     106 allocs/op
+trial 3 BenchmarkOperation/proxy/parallel=1-10          	    2000	    189541 ns/op	        14.00 goroutines	       189.0 mean-us	      5276 ops/sec	       171.0 p50-us	       282.0 p95-us	       379.0 wall-ms	   18154 B/op	     210 allocs/op
+trial 3 BenchmarkOperation/direct/parallel=8-10         	    2000	     48384 ns/op	        35.00 goroutines	       384.0 mean-us	     20668 ops/sec	       301.0 p50-us	       838.0 p95-us	        96.00 wall-ms	    8722 B/op	     106 allocs/op
+trial 3 BenchmarkOperation/proxy/parallel=8-10          	    2000	     64628 ns/op	        59.00 goroutines	       514.0 mean-us	     15473 ops/sec	       470.0 p50-us	       780.0 p95-us	       129.0 wall-ms	   19165 B/op	     212 allocs/op
+trial 3 BenchmarkOperation/direct/parallel=32-10        	    2000	     32879 ns/op	       107.0 goroutines	      1024 mean-us	     30415 ops/sec	       924.0 p50-us	      1628 p95-us	        65.00 wall-ms	    9275 B/op	     107 allocs/op
+trial 3 BenchmarkOperation/proxy/parallel=32-10         	    2000	     66406 ns/op	       206.0 goroutines	      2097 mean-us	     15059 ops/sec	      1938 p50-us	      2802 p95-us	       132.0 wall-ms	   19022 B/op	     212 allocs/op
+trial 4 BenchmarkOperation/direct/parallel=1-10         	    2000	    103570 ns/op	         8.000 goroutines	       103.0 mean-us	      9655 ops/sec	        85.00 p50-us	       161.0 p95-us	       207.0 wall-ms	    8518 B/op	     106 allocs/op
+trial 4 BenchmarkOperation/proxy/parallel=1-10          	    2000	    188440 ns/op	        14.00 goroutines	       188.0 mean-us	      5307 ops/sec	       171.0 p50-us	       261.0 p95-us	       376.0 wall-ms	   18358 B/op	     210 allocs/op
+trial 4 BenchmarkOperation/direct/parallel=8-10         	    2000	     30082 ns/op	        35.00 goroutines	       238.0 mean-us	     33242 ops/sec	       222.0 p50-us	       345.0 p95-us	        60.00 wall-ms	    9568 B/op	     106 allocs/op
+trial 4 BenchmarkOperation/proxy/parallel=8-10          	    2000	     66184 ns/op	        62.00 goroutines	       523.0 mean-us	     15109 ops/sec	       468.0 p50-us	       856.0 p95-us	       132.0 wall-ms	   18897 B/op	     211 allocs/op
+trial 4 BenchmarkOperation/direct/parallel=32-10        	    2000	     33031 ns/op	       122.0 goroutines	      1022 mean-us	     30274 ops/sec	       888.0 p50-us	      1923 p95-us	        66.00 wall-ms	    9413 B/op	     107 allocs/op
+trial 4 BenchmarkOperation/proxy/parallel=32-10         	    2000	     65623 ns/op	       203.0 goroutines	      2059 mean-us	     15238 ops/sec	      1841 p50-us	      3137 p95-us	       131.0 wall-ms	   19060 B/op	     213 allocs/op
+trial 5 BenchmarkOperation/direct/parallel=1-10         	    2000	    130052 ns/op	         8.000 goroutines	       129.0 mean-us	      7689 ops/sec	        92.00 p50-us	       248.0 p95-us	       260.0 wall-ms	    8539 B/op	     106 allocs/op
+trial 5 BenchmarkOperation/proxy/parallel=1-10          	    2000	    187426 ns/op	        14.00 goroutines	       187.0 mean-us	      5335 ops/sec	       168.0 p50-us	       271.0 p95-us	       374.0 wall-ms	   18310 B/op	     210 allocs/op
+trial 5 BenchmarkOperation/direct/parallel=8-10         	    2000	     30313 ns/op	        35.00 goroutines	       240.0 mean-us	     32989 ops/sec	       227.0 p50-us	       336.0 p95-us	        60.00 wall-ms	    8876 B/op	     106 allocs/op
+trial 5 BenchmarkOperation/proxy/parallel=8-10          	    2000	     62981 ns/op	        59.00 goroutines	       500.0 mean-us	     15878 ops/sec	       460.0 p50-us	       774.0 p95-us	       125.0 wall-ms	   18924 B/op	     212 allocs/op
+trial 5 BenchmarkOperation/direct/parallel=32-10        	    2000	     33393 ns/op	       107.0 goroutines	      1039 mean-us	     29947 ops/sec	       990.0 p50-us	      1671 p95-us	        66.00 wall-ms	    9281 B/op	     107 allocs/op
+trial 5 BenchmarkOperation/proxy/parallel=32-10         	    2000	     65581 ns/op	       206.0 goroutines	      2069 mean-us	     15248 ops/sec	      1877 p50-us	      2920 p95-us	       131.0 wall-ms	   18939 B/op	     213 allocs/op
+
+median trial by throughput, printed whole (one real measurement per row)
+path     parallel    ops/sec    wall-ms    mean-us     p50-us     p95-us       B/op  allocs/op goroutines
+direct          1       9655        207        103         85        161       8518        106          8
+direct          8      32989         60        240        227        336       8876        106         35
+direct         32      30415         65       1024        924       1628       9275        107        107
+proxy           1       5276        379        189        171        282      18154        210         14
+proxy           8      15619        128        507        461        809      19185        211         59
+proxy          32      15238        131       2059       1841       3137      19060        213        203
+
+between-trial spread, min .. max over all trials
+path     parallel             ops/sec            p50-us              p95-us
+direct          1         7689..10427            80..92            156..248
+direct          8        20668..33317          218..301            336..838
+direct         32        29947..31153          886..990          1453..1923
+proxy           1          4505..5335          168..183            261..390
+proxy           8        15109..16563          443..470            712..856
+proxy          32        13293..15555        1841..2265          2784..3772
+
+proxy minus direct, from the median trials above
+parallel   mean us   p50 us   p95 us    ops/sec  goroutines
+       1       +86      +86     +121      -4379          +6
+       8      +267     +234     +473     -17370         +24
+      32     +1035     +917    +1509     -15177         +96
+
+throughput ratio, direct over proxy, per trial
+  parallel=1   2.02 2.14 1.98 1.82 1.44   (median 1.98)
+  parallel=8   2.01 2.03 1.34 2.20 2.08   (median 2.03)
+  parallel=32  2.00 2.31 2.02 1.99 1.96   (median 2.00)
+
+load:    8.10 5.54 4.97 (1/5/15 min) after the run

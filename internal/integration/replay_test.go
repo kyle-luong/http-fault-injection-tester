@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -44,7 +45,7 @@ func TestTraceReplayReproducesTheRecordedCase(t *testing.T) {
 			}
 
 			dir := t.TempDir()
-			if err := trace.WriteRun(dir, false, "run-test", time.Now().UTC(),
+			if err := trace.WriteRun(context.Background(), dir, false, "run-test", time.Now().UTC(),
 				runner.DefaultCaseTimeout, sc, []runner.Outcome{recorded}); err != nil {
 				t.Fatalf("WriteRun: %v", err)
 			}
@@ -136,7 +137,7 @@ func TestReplayUsesTheRecordedDeadline(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := trace.WriteRun(dir, false, "run-test", time.Now().UTC(), env.CaseTimeout(), sc,
+	if err := trace.WriteRun(context.Background(), dir, false, "run-test", time.Now().UTC(), env.CaseTimeout(), sc,
 		[]runner.Outcome{recorded}); err != nil {
 		t.Fatalf("WriteRun: %v", err)
 	}

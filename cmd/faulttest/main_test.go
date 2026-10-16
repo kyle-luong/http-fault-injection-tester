@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kyle-luong/http-fault-injection-tester/internal/runner"
 )
@@ -778,5 +779,92 @@ func TestReplayUsesTheDeadlineFromTheTrace(t *testing.T) {
 	}
 	if code != exitHarness {
 		t.Errorf("exit code = %d, want %d: an inconclusive case stays indeterminate", code, exitHarness)
+	}
+}
+
+// TestInterruptPhases covers what successive interrupts mean. Replacing the
+// whole dispatcher with a single cancellation used to leave the suite green,
+// so this is the only thing holding that contract.
+func TestInterruptPhases(t *testing.T) {
+	signals := make(chan os.Signal, 4)
+	done := make(chan struct{})
+	defer close(done)
+
+	events := make(chan string, 4)
+	go interruptPhases(signals,
+		done,
+		func() { events <- "run" },
+		func() { events <- "output" },
+		func() { events <- "die" },
+	)
+
+	for _, want := range []string{"run", "output", "die"} {
+		signals <- os.Interrupt
+		select {
+		case got := <-events:
+			if got != want {
+				t.Fatalf("interrupt produced %q, want %q", got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("no response to the interrupt that should have produced %q", want)
+		}
+	}
+
+	// Having given up, the dispatcher is finished: it must not keep absorbing
+	// signals, because the process has to be able to die.
+	signals <- os.Interrupt
+	select {
+	case got := <-events:
+		t.Errorf("the dispatcher acted on a further interrupt (%q) after giving up", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestInterruptPhasesStopsWithTheRun checks the dispatcher releases when the
+// command returns, rather than leaving a goroutine blocked on a channel
+// nobody will write to again.
+func TestInterruptPhasesStopsWithTheRun(t *testing.T) {
+	signals := make(chan os.Signal)
+	done := make(chan struct{})
+	finished := make(chan struct{})
+
+	go func() {
+		interruptPhases(signals, done, func() {}, func() {}, func() {})
+		close(finished)
+	}()
+
+	close(done)
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Error("the dispatcher did not return when the command finished")
+	}
+}
+
+// TestNoReproduceLineWithoutAViolation: an inconclusive case has no outcome to
+// reproduce, so nominating one would send the operator to a replay that
+// reports a mismatch by construction. After an interrupt every unfinished
+// case is inconclusive, which is when this matters most.
+func TestNoReproduceLineWithoutAViolation(t *testing.T) {
+	dir := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"run", "--scenario", scenarioPath("delayed-response.json"),
+		"--timeout", "100ms", "--traces", dir,
+	}, &stdout, &stderr)
+	if code != exitHarness {
+		t.Fatalf("exit code = %d, want %d (inconclusive); stdout:\n%s", code, exitHarness, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Inconclusive: 1") {
+		t.Fatalf("expected an inconclusive case:\n%s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Reproduce:") {
+		t.Errorf("a run with no violation nominated a case to reproduce:\n%s", stdout.String())
+	}
+	// The trace is still written: it is evidence, even though it is not a
+	// reproduction.
+	if _, err := os.Stat(filepath.Join(dir, "case-0001.json")); err != nil {
+		t.Errorf("the inconclusive case's trace was not written: %v", err)
 	}
 }
