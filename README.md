@@ -21,8 +21,9 @@ scenario JSON → validator → runner → test client → fault proxy → test 
 
 ## Status
 
-Milestones M1 and M2 of five are complete: the lost-response path works end to
-end, and cases run concurrently under a bounded worker pool. See
+Milestones M1 to M3 of five are complete: the lost-response path works end to
+end, cases run concurrently under a bounded worker pool, and results are saved
+as structured JSON. See
 [`docs/MILESTONES.md`](docs/MILESTONES.md) for what each later milestone adds,
 and [`docs/STATUS.md`](docs/STATUS.md) for current state.
 
@@ -111,6 +112,27 @@ interrupt is still reported, and still sets exit code 1.
 
 Measured throughput, and the reasons to distrust its absolute values, are in
 [`docs/benchmarks/M2-throughput.md`](docs/benchmarks/M2-throughput.md).
+
+## Saving and re-reading results
+
+`--out PATH` writes the run's structured result JSON: the verdict, attempts,
+injected fault decisions and observed state for every case, with a schema
+version and run ID. `report PATH` prints the same summary and returns the same
+exit code from a saved result, executing nothing.
+
+```console
+$ ./faulttest run --scenario scenarios/lost-response.json --runs 4 --out results/run.json
+$ ./faulttest report results/run.json
+Run run-65d921356d6d58da started 2026-11-12T22:12:50Z
+Scenario: lost-response | Fixture: unsafe-counter
+Cases: 4  Passed: 0  Failed: 4  Inconclusive: 0  Infrastructure: 0
+```
+
+The file holds no request bodies and no request headers. The one request-side
+value it records is the harness's own idempotency key, which identifies the
+logical operation and carries no caller data. An existing path is refused
+unless `--overwrite` is given, and an unwritable one is refused before the run
+starts rather than after it.
 
 ## Exit codes
 

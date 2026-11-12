@@ -23,13 +23,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kyle-luong/http-fault-injection-tester/internal/report"
 	"github.com/kyle-luong/http-fault-injection-tester/internal/runner"
 	"github.com/kyle-luong/http-fault-injection-tester/internal/scenario"
 	"github.com/kyle-luong/http-fault-injection-tester/internal/verify"
 )
 
 // version is the tool's own version, bumped by hand at milestones.
-const version = "0.2.0-M2"
+const version = "0.3.0-M3"
 
 // Exit codes.
 const (
@@ -60,6 +61,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "run":
 		return runScenario(args[1:], stdout, stderr)
+	case "report":
+		return reportSaved(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "faulttest %s\n", version)
 		return exitPass
@@ -85,6 +88,8 @@ func runScenario(args []string, stdout, stderr io.Writer) int {
 		fmt.Sprintf("independent cases to execute, each with isolated state (max %d)", runner.MaxRuns))
 	parallel := fs.Int("parallel", runner.DefaultParallel,
 		fmt.Sprintf("greatest number of cases in flight at once (max %d)", runner.MaxParallel))
+	outPath := fs.String("out", "", "write the structured result JSON to this path")
+	overwrite := fs.Bool("overwrite", false, "allow --out to replace an existing file")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -128,6 +133,21 @@ func runScenario(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "--case-id runs a single case, so --parallel does not apply")
 		return exitUsage
 	}
+	if *overwrite && *outPath == "" {
+		fmt.Fprintln(stderr, "--overwrite applies to --out, which was not given")
+		return exitUsage
+	}
+
+	// Checked before the run, not after it: discovering an unusable path once
+	// 500 cases have executed would throw away the whole run. This probes
+	// writability as well as existence, because a refused directory fails
+	// just as late as a taken filename.
+	if *outPath != "" {
+		if err := report.CheckWritable(*outPath, *overwrite); err != nil {
+			fmt.Fprintf(stderr, "%v\n", err)
+			return exitUsage
+		}
+	}
 
 	sc, err := scenario.Load(*scenarioPath)
 	if err != nil {
@@ -149,6 +169,8 @@ func runScenario(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	runID, startedAt := report.NewRunID(), time.Now().UTC()
+
 	var summary runner.Summary
 	if caseIDGiven {
 		summary = env.RunOne(ctx, *caseID)
@@ -159,7 +181,7 @@ func runScenario(args []string, stdout, stderr io.Writer) int {
 			return exitUsage
 		}
 	}
-	report(stdout, summary)
+	printSummary(stdout, summary)
 
 	if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(ctxErr, context.Canceled) {
 		// Reported, but it does not decide the exit code: an interrupted run
@@ -167,7 +189,40 @@ func runScenario(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "run interrupted")
 	}
 
-	return exitCodeFor(summary)
+	code := exitCodeFor(summary)
+	if *outPath != "" {
+		if err := report.Write(*outPath, *overwrite, report.New(runID, startedAt, summary)); err != nil {
+			fmt.Fprintf(stderr, "could not write results: %v\n", err)
+			// A result file that was asked for and never arrived must not
+			// leave behind the exit code of a clean run.
+			if code == exitPass {
+				code = exitHarness
+			}
+		} else {
+			fmt.Fprintf(stdout, "Results: %s\n", *outPath)
+		}
+	}
+	return code
+}
+
+// reportSaved summarises a saved result without executing anything, and
+// returns the same exit code the original run did, so a stored result stays
+// usable in a pipeline.
+func reportSaved(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprintln(stderr, "usage: faulttest report PATH")
+		return exitUsage
+	}
+
+	result, err := report.Load(args[0])
+	if err != nil {
+		fmt.Fprintf(stderr, "invalid result: %v\n", err)
+		return exitUsage
+	}
+
+	fmt.Fprintf(stdout, "Run %s started %s\n", result.RunID, result.StartedAt.Format(time.RFC3339))
+	printSummary(stdout, result.Summary)
+	return exitCodeFor(result.Summary)
 }
 
 // exitCodeFor maps a finished run onto the exit-code contract. A failed
@@ -185,7 +240,7 @@ func exitCodeFor(s runner.Summary) int {
 	}
 }
 
-func report(w io.Writer, s runner.Summary) {
+func printSummary(w io.Writer, s runner.Summary) {
 	fmt.Fprintf(w, "Scenario: %s | Fixture: %s\n", s.Scenario, s.Fixture)
 	fmt.Fprintf(w, "Cases: %d  Passed: %d  Failed: %d  Inconclusive: %d  Infrastructure: %d\n",
 		s.Executed, s.Passed, s.Failed, s.Inconclusive, s.HarnessErrors)
@@ -219,14 +274,14 @@ func report(w io.Writer, s runner.Summary) {
 		detail = detail[:maxReportedCases]
 	}
 	for _, o := range detail {
-		reportCase(w, o)
+		printCase(w, o)
 	}
 	if omitted > 0 {
 		fmt.Fprintf(w, "... and %d further case(s) not shown\n", omitted)
 	}
 }
 
-func reportCase(w io.Writer, o runner.Outcome) {
+func printCase(w io.Writer, o runner.Outcome) {
 	fmt.Fprintf(w, "Case %s: verdict=%s attempts=%d duration=%s\n",
 		o.CaseID, o.Verdict(), len(o.Attempts), o.Duration.Round(time.Millisecond))
 
@@ -254,7 +309,9 @@ func usage(w io.Writer) {
 
 Usage:
   faulttest run --scenario PATH [--runs N] [--parallel N] [--timeout DURATION]
+                                [--out PATH [--overwrite]]
   faulttest run --scenario PATH --case-id ID [--timeout DURATION]
+  faulttest report PATH
   faulttest version
 
 The scenario's fixture is started on a loopback address, traffic is forwarded
@@ -270,6 +327,14 @@ Exit codes: 0 pass, 1 invariant failed, 2 invalid input, 3 infrastructure
 failure or indeterminate outcome. A failed invariant outranks an indeterminate
 case, so a real finding is never hidden by one.
 
-Not yet implemented: --out structured results (GO-05), replay (GO-06).
+--out writes the run's structured result JSON, which records the verdict, the
+attempts, the injected fault decisions and the observed state for every case.
+It holds no request bodies and no request headers; the only request-side value
+recorded is the harness's own idempotency key, which identifies the logical
+operation and carries no caller data. An existing path is refused unless
+--overwrite is given. "report PATH" prints the same summary from a saved
+result without executing anything.
+
+Not yet implemented: per-case trace files and replay (GO-06).
 `)
 }

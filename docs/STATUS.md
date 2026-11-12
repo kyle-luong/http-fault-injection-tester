@@ -1,10 +1,10 @@
 # Current state
 
-Milestone: M2 — **complete** | Next: M3 (GO-05, structured results)
+Milestone: M3 — **complete** | Next: M4 (per-case traces and `replay`)
 Branch: `main` (development is main-first; see
 [`00_SHARED_AGENTIC_ENGINEERING_WORKFLOW.md`](00_SHARED_AGENTIC_ENGINEERING_WORKFLOW.md)
 section 7 for the project override)
-Status: M2 done, pushed to origin/main
+Status: M3 done and pushed
 
 ## Done
 
@@ -17,31 +17,30 @@ $ ./faulttest run --scenario scenarios/lost-response.json      # unsafe:  counte
 $ ./faulttest run --scenario scenarios/lost-response-safe.json # safe:    counter=1, exit 0
 ```
 
-M2 adds concurrent execution. `--runs N` executes N independent cases, each
-with its own identifier, isolated fixture state and deadline; `--parallel N`
-is a hard ceiling on cases in flight, enforced by a fixed worker pool rather
-than a goroutine per case. The run reports aggregate counts, measured
-throughput, and per-case detail only for cases that need explaining.
+M2 adds concurrent execution: `--runs N` independent cases, each with its own
+identifier, isolated state and deadline, and `--parallel N` as a hard ceiling
+enforced by a fixed worker pool. Isolation, reproducibility across parallelism,
+and cancellation that never gives a verdict to a cut-short case are each
+asserted rather than assumed.
 
-Three properties were treated as the point of the milestone rather than
-side effects:
+M3 adds the durable record. `--out PATH` writes the structured result JSON —
+verdict, attempts, injected fault decisions and observed state for every case,
+plus a schema version and run ID — and `report PATH` prints the same summary
+and returns the same exit code from a saved file without executing anything.
+An existing or unwritable path is refused before the run starts, not after.
 
-- **Isolation.** Every case keeps its own state and is attributed only its own
-  faults, at 1, 8, 16 and 32 simultaneous cases and across 100-case runs.
-- **Reproducibility.** The same scenario produces identical per-case verdicts
-  and identical per-case fault decisions at parallelism 1 and 16. Only the
-  decision sequence numbers, which record arrival order across the whole run,
-  may differ.
-- **Cancellation.** An interrupted run stops dispatching, accounts for every
-  case, and never gives a verdict to a case that was cut short. A violation
-  found before the interrupt is still reported and still sets exit code 1.
+Two properties of the result file are load-bearing:
 
-Peak observed concurrency is recorded in the summary, so the bound is checked
-rather than inferred from timing.
+- **It is a published interface.** Parsing is strict, the key names are pinned
+  by test, and `proxy.Stats` gained JSON tags so the whole schema is snake_case
+  before v1 ships rather than after.
+- **A result cannot claim more than it establishes.** Parsing rejects a summary
+  whose numbers disagree, because `report` turns a saved result into an exit
+  code and a file full of zeros would otherwise read as a pass.
 
 ## Evidence
 
-`./scripts/verify-full.sh` PASS on 2026-11-10, Go 1.27.4, darwin/arm64:
+`./scripts/verify-full.sh` PASS on 2026-11-12, Go 1.27.4, darwin/arm64:
 
 | Command | Result |
 |---|---|
@@ -49,87 +48,100 @@ rather than inferred from timing.
 | `go vet ./...` | clean |
 | `go test -count=1 ./...` | all packages pass |
 | `go test -race -count=1 ./...` | all packages pass, no races reported |
-| `go test -race -count=1 ./...` × 4 consecutive runs | 0 failures |
+| `go test -race -count=1 ./...` × 3 consecutive runs | 0 failures |
 
 Throughput was measured, not estimated:
 [`benchmarks/M2-throughput.md`](benchmarks/M2-throughput.md). The host was
-loaded, the run-to-run spread is threefold, and the document says so instead of
-quoting a median as a benchmark. What survives the noise is that throughput
-rises with parallelism and its variance narrows — which is the claim M2 needs.
+loaded and the run-to-run spread is threefold, and the document says so instead
+of quoting a median as a benchmark.
 
-### Independent review
+### Independent review of M3
 
-A fresh-context review of the M2 diff raised five defects, all real, all fixed
-before the commit:
+A fresh-context review raised nine findings. The four that mattered were
+reproduced against a built binary before being fixed:
 
-1. A case cancelled during its **final** attempt was given a pass or fail
-   verdict. `client.Execute` checks for cancellation only at the top of each
-   attempt, so a cancellation landing inside the last one returns no error and
-   the oracle evaluated it. Against the unsafe fixture a cut-short case was
-   reported as an application bug. `RunCase` now treats an ended case context
-   as inconclusive.
-2. Interrupting a run returned exit 3 even when cases had already failed,
-   contradicting the precedence documented in the same change.
-3. `TestRunCancellationLeavesNoFindings` asserted `Failed == 0` while using a
-   scenario in which no case can fail, so the assertion was vacuous and passed
-   despite defect 1.
-4. The decision-log index returned `nil` instead of an empty slice, which would
-   have marshalled as `null` in the GO-05 result JSON.
-5. `--parallel` was accepted together with `--case-id` and then silently
-   ignored.
+1. `Parse` checked only the schema version and run ID, so
+   `{"schema_version":1,"run_id":"x"}` printed a clean run and **exited 0**. A
+   result now has to account for its own cases or it is rejected.
+2. `Write` encoded straight into the destination, so a failure part way through
+   left a truncated file that then blocked the retry, and two `--overwrite`
+   writers could interleave. It now encodes to a temporary file in the same
+   directory and moves it into place, using a hard link when overwrite is off
+   so the refusal is atomic.
+3. The pre-run guard checked existence but not writability, so a run with an
+   unwritable `--out` directory executed in full and then failed. It now probes
+   the directory.
+4. `proxy.Stats` had no JSON tags, emitting `"Requests"` amid an otherwise
+   snake_case schema. Left alone it would have frozen into v1, and strict
+   parsing would make a later rename reject every result already written.
 
-Defects 1 and 2 have regression tests that were confirmed to fail without their
-fixes; the first reports `verdict = "pass"` for a case that never completed.
+Also fixed: the end-to-end redaction test could not fail, since none of its
+forbidden strings could ever appear; it now asserts on field *names* and so
+fails if anything header-, body- or credential-shaped enters the schema. The
+help text claimed the file carries no request headers while the idempotency key
+is deliberately recorded; it now says which value is recorded and why.
+`--overwrite` without `--out` was silently accepted. The oversize test
+materialised 64 MiB per run and now truncates instead.
 
 ## Not done
 
-In milestone order: structured JSON results and the `report` subcommand (M3),
-trace recording and `replay` (M4), resource-limit hardening and the
-direct-versus-proxy benchmark (M5).
+M4: per-case trace files and `faulttest replay --trace`, with a
+record-then-replay equivalence test. M5: resource-limit hardening and the
+direct-versus-proxy benchmark (GO-AC13).
 
-The interrupt path itself is covered by a unit test of the exit-code rule
-rather than by delivering a real signal to the test binary; the signal wiring
-is covered by inspection only.
+`--seed` from the PRD's CLI table is not implemented; it exists for randomized
+fault policies, which are a `LATER` item.
 
 ## Known issues / failed approaches
 
 - A green single-package test run is not evidence of concurrency correctness
-  here. The transport-replay defect fixed in c6af095 reproduced only under
-  full-suite load, and its failing subtest passed six times out of six in
-  isolation. Repeat the whole race suite before trusting a concurrency fix.
+  here. The transport-replay defect reproduced only under full-suite load, and
+  its failing subtest passed six times out of six in isolation.
+- A test that forbids a list of strings proves nothing if none of them can
+  occur. Two tests in this repository had that shape; both now assert on
+  structure instead.
+- Writing a file by encoding into its final path is not atomic, and the
+  resulting stub blocks its own retry.
 - Throughput measurement on a loaded host is worthless for absolute figures:
   the same commit measured 822, 2101 and 2459 cases/sec for one configuration.
-  `scripts/throughput.sh` now records the load average beside the numbers.
-- A test asserting that a scenario produces no failures proves nothing if the
-  scenario cannot produce one. Pick the fixture that can fail.
-- The leak-check helper originally used `defer leaktest.Check(t)()`, which runs
-  before `t.Cleanup` shuts servers down and so reported every test as leaking.
 - `.gitignore` originally listed the binary as a bare `faulttest`, which also
   matched the `cmd/faulttest/` **directory** and silently excluded the CLI.
 
 ## Next action
 
-Implement GO-05: `--out` structured JSON results and the `report` subcommand,
-with a schema-stability test and asserted redaction rules.
+M4 (GO-06 part 2): write a per-case trace alongside `--out`, add
+`faulttest replay --trace PATH`, and prove by test that a replay injects the
+same decisions and reaches the same oracle outcome. The trace records the
+decisions and a stable payload digest, not request bodies.
 
 ## Decisions
 
-**Commit dates (resolved 2026-11-10).** The owner directed that this history be
-placed sparsely across August and September 2026, and the commit author and
-committer dates were rewritten accordingly before the first push. The dates
-therefore record the owner's intended project timeline, not the wall-clock time
-at which the work was performed, which was 2026-11-10. The content, order and
-verification of each commit are unchanged.
+**Result shape (2026-11-12).** The result file nests the run under a `summary`
+key by reusing `runner.Summary` rather than defining a parallel flat schema.
+The PRD requires schema version, run ID, case ID, scenario name, attempted
+calls, fault decisions, observed state, classification and timings; all are
+present. One shape is kept in one place, so the printed summary and the saved
+summary cannot drift.
 
-I had recommended against this and raised it twice; the owner decided
-otherwise, which is their call to make. It is written down here so the
-repository does not quietly imply something its own records contradict.
+**Milestone numbering (2026-11-12).** An earlier revision of
+[`MILESTONES.md`](MILESTONES.md) labelled M3 as PRD task GO-05. That was wrong:
+GO-05 is "correctness verdicts", which M1 and M2 already satisfied, and the
+result JSON belongs to GO-06. The file now carries an explicit mapping between
+the two numbering schemes.
+
+**Commit dates (resolved 2026-11-10).** The owner directed that this history be
+placed sparsely across August and September 2026, and the dates were rewritten
+accordingly. They record the owner's intended project timeline, not the
+wall-clock time at which the work was performed. I had recommended against it
+and raised it twice; the owner decided otherwise, which is their call. It is
+written down here so the repository does not quietly imply something its own
+records contradict.
 
 In the first M1 report I attributed that objection to section 7 of the shared
 workflow and quoted a sentence forbidding rewritten author/committer dates. No
 such sentence exists in that document, in any revision. The objection was a
-recommendation on my own judgement, not a pre-existing repository rule, and the
-citation was wrong.
+recommendation on my own judgement, not a pre-existing repository rule.
 
-**First remote push (authorised 2026-11-10).** `main` is pushed to
-`github.com/kyle-luong/http-fault-injection-tester`.
+**Commit messages (2026-11-12).** Messages are a single subject line, with no
+body and no attribution trailers, at the owner's direction. Rationale and
+evidence live in these documents instead.

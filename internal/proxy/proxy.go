@@ -78,11 +78,14 @@ type Options struct {
 }
 
 // Stats is a snapshot of proxy counters.
+// The tags matter: Stats is serialised into the published result file, which
+// is snake_case throughout, and renaming a key after v1 ships would make
+// strict parsing reject every result already written.
 type Stats struct {
-	Requests       int64
-	Forwarded      int64
-	FaultsInjected int64
-	Rejected       int64
+	Requests       int64 `json:"requests"`
+	Forwarded      int64 `json:"forwarded"`
+	FaultsInjected int64 `json:"faults_injected"`
+	Rejected       int64 `json:"rejected"`
 }
 
 // Proxy is a running proxy instance.

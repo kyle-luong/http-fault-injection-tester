@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -94,6 +95,10 @@ func TestUsageErrorsExitTwo(t *testing.T) {
 		{"parallelism below the bound", []string{"run", "--scenario", scenarioPath("lost-response.json"), "--parallel", "0"}},
 		{"parallelism past the bound", []string{"run", "--scenario", scenarioPath("lost-response.json"), "--parallel", "65"}},
 		{"case id with many runs", []string{"run", "--scenario", scenarioPath("lost-response.json"), "--runs", "2", "--case-id", "c"}},
+		{"report without a path", []string{"report"}},
+		{"report with two paths", []string{"report", "a", "b"}},
+		{"report of a missing file", []string{"report", missing}},
+		{"report of an invalid file", []string{"report", bad}},
 		{"stray positional argument", []string{"run", "--scenario", scenarioPath("lost-response.json"), "extra"}},
 		{"zero timeout", []string{"run", "--scenario", scenarioPath("lost-response.json"), "--timeout", "0s"}},
 		{"timeout past the bound", []string{"run", "--scenario", scenarioPath("lost-response.json"), "--timeout", "10m"}},
@@ -234,5 +239,144 @@ func TestExitCodePrecedence(t *testing.T) {
 				t.Errorf("exitCodeFor(%+v) = %d, want %d", tc.summary, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRunWritesResultsAndReportReadsThemBack covers GO-T14 for the saved
+// result: a run can hand its verdict to a later command, and that command
+// reproduces the same summary and the same exit code without executing
+// anything.
+func TestRunWritesResultsAndReportReadsThemBack(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "nested", "run.json")
+
+	var runOut, runErr bytes.Buffer
+	code := run([]string{
+		"run", "--scenario", scenarioPath("lost-response.json"),
+		"--runs", "4", "--parallel", "2", "--out", out,
+	}, &runOut, &runErr)
+	if code != exitInvariant {
+		t.Fatalf("run exit code = %d, want %d; stderr:\n%s", code, exitInvariant, runErr.String())
+	}
+	if !strings.Contains(runOut.String(), "Results: "+out) {
+		t.Errorf("run did not report where it wrote results:\n%s", runOut.String())
+	}
+
+	var repOut, repErr bytes.Buffer
+	if code := run([]string{"report", out}, &repOut, &repErr); code != exitInvariant {
+		t.Fatalf("report exit code = %d, want %d; stderr:\n%s", code, exitInvariant, repErr.String())
+	}
+
+	// The saved result must carry the counts, not recompute them.
+	const wantCounts = "Cases: 4  Passed: 0  Failed: 4"
+	if !strings.Contains(repOut.String(), wantCounts) {
+		t.Errorf("report output did not contain %q:\n%s", wantCounts, repOut.String())
+	}
+	if !strings.Contains(repOut.String(), "Run run-") {
+		t.Errorf("report output did not identify the run:\n%s", repOut.String())
+	}
+	for _, want := range []string{"Scenario: lost-response", "Violation: expected counter=1"} {
+		if !strings.Contains(repOut.String(), want) {
+			t.Errorf("report output did not contain %q:\n%s", want, repOut.String())
+		}
+	}
+}
+
+// TestOutRefusesAnExistingPath checks the refusal happens before the run, so
+// a mistyped path cannot cost a completed run.
+func TestOutRefusesAnExistingPath(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "run.json")
+	if err := os.WriteFile(out, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"run", "--scenario", scenarioPath("no-fault-baseline.json"), "--out", out,
+	}, &stdout, &stderr); code != exitUsage {
+		t.Fatalf("exit code = %d, want %d", code, exitUsage)
+	}
+	if !strings.Contains(stderr.String(), "--overwrite") {
+		t.Errorf("stderr did not explain how to proceed:\n%s", stderr.String())
+	}
+	// Refused before executing: the untouched file proves nothing ran over it.
+	if data, err := os.ReadFile(out); err != nil || string(data) != "{}" {
+		t.Errorf("the existing file was modified: %q, %v", data, err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{
+		"run", "--scenario", scenarioPath("no-fault-baseline.json"), "--out", out, "--overwrite",
+	}, &stdout, &stderr); code != exitPass {
+		t.Fatalf("exit code with --overwrite = %d, want %d; stderr:\n%s", code, exitPass, stderr.String())
+	}
+}
+
+// TestResultFileCarriesNoRequestPayloads is the end-to-end half of GO-AC09:
+// whatever a real run observes, the file it leaves behind holds no request
+// body and no credential-bearing header.
+//
+// The assertion is on key names rather than on a list of values, because a
+// value list can only catch leaks someone thought of in advance: this fails
+// the moment any field whose name looks like a header, a body or a credential
+// enters the schema.
+//
+// The idempotency key is present on purpose and is not a leak. It is the
+// harness's own identifier for a logical operation, which the PRD requires
+// for traceability, and it carries no caller data.
+func TestResultFileCarriesNoRequestPayloads(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "run.json")
+
+	var stdout, stderr bytes.Buffer
+	run([]string{
+		"run", "--scenario", scenarioPath("lost-response.json"), "--runs", "2", "--out", out,
+	}, &stdout, &stderr)
+
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+
+	risky := regexp.MustCompile(`(?i)"[a-z_]*(header|body|cookie|auth|token|secret|password|credential)[a-z_]*"\s*:`)
+	if found := risky.FindAllString(string(data), -1); found != nil {
+		t.Errorf("result file contains field(s) that suggest request data: %v", found)
+	}
+	// The fixture's request body field, which must never be serialised.
+	if strings.Contains(string(data), `"delta"`) {
+		t.Error("result file recorded the request body")
+	}
+}
+
+// TestOverwriteWithoutOutIsRejected keeps the flag combinations honest: a flag
+// that silently does nothing is worse than one that is refused.
+func TestOverwriteWithoutOutIsRejected(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"run", "--scenario", scenarioPath("no-fault-baseline.json"), "--overwrite",
+	}, &stdout, &stderr); code != exitUsage {
+		t.Errorf("exit code = %d, want %d; stderr:\n%s", code, exitUsage, stderr.String())
+	}
+}
+
+// TestOutRefusesAnUnwritablePathBeforeRunning covers the other way a result
+// path fails late: the file name is free but the directory is not writable.
+func TestOutRefusesAnUnwritablePathBeforeRunning(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := filepath.Join(t.TempDir(), "readonly")
+	if err := os.Mkdir(dir, 0o500); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"run", "--scenario", scenarioPath("no-fault-baseline.json"),
+		"--out", filepath.Join(dir, "run.json"),
+	}, &stdout, &stderr); code != exitUsage {
+		t.Errorf("exit code = %d, want %d; stderr:\n%s", code, exitUsage, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("a run executed before the path was refused:\n%s", stdout.String())
 	}
 }
